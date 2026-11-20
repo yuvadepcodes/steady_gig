@@ -8,10 +8,9 @@ import {
   Calendar as CalendarIcon,
   ChevronLeft,
   ChevronRight,
-  CloudRain,
   Edit3,
   Plus,
-  ShieldCheck,
+  Upload,
   Trash2,
   X,
 } from 'lucide-react';
@@ -25,7 +24,6 @@ import {
   getDaysInMonth,
   getFirstWeekdayOfMonth,
   getMonthActualEarningsSummary,
-  IMD_RAINFALL_NORMALS,
   INITIAL_FESTIVAL_EVENTS,
   INITIAL_INCENTIVES,
   MonthCalendarPlan,
@@ -33,7 +31,6 @@ import {
 } from '@/lib/bengaluru-calendar';
 import {
   buildCustomWeekRecord,
-  computeEmergencyFund,
   computeLearnedPattern,
   INITIAL_WEEKLY_RECORDS,
   WEEKDAYS_ORDER,
@@ -43,9 +40,13 @@ import {
 
 interface FinancialCalendarViewProps {
   vaultBalance: number;
-  weeklyObligations: number;
+  weeklyObligations?: number;
   onVaultUpdated?: () => void;
   openAddWeekModalSignal?: number;
+  externalWeeks?: WeeklyEarningsRecord[];
+  externalIncentives?: PlatformIncentive[];
+  onAddIncentiveExternal?: (inc: PlatformIncentive) => void;
+  onRequestUploadScreenshot?: () => void;
 }
 
 const WEEKDAY_HEADERS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
@@ -91,9 +92,12 @@ interface HoveredDayState {
 
 export default function FinancialCalendarView({
   vaultBalance,
-  weeklyObligations,
   onVaultUpdated,
   openAddWeekModalSignal = 0,
+  externalWeeks,
+  externalIncentives,
+  onAddIncentiveExternal,
+  onRequestUploadScreenshot,
 }: FinancialCalendarViewProps) {
   // Current day tracking (defaults to 2026-11-20 for SSR safety, syncs to browser local date on mount)
   const [todayISO, setTodayISO] = useState<string>('2026-11-20');
@@ -128,7 +132,7 @@ export default function FinancialCalendarView({
 
   // Lower planning workspace tabs
   const [plannerTab, setPlannerTab] = useState<
-    'planner' | 'incentives' | 'weather' | 'festivals'
+    'planner' | 'incentives' | 'festivals'
   >('planner');
 
   // Editable Festival & Islamic Holiday Dates
@@ -140,7 +144,9 @@ export default function FinancialCalendarView({
 
   // Editable Platform Incentives
   const [incentives, setIncentives] = useState<PlatformIncentive[]>(
-    INITIAL_INCENTIVES
+    externalIncentives && externalIncentives.length > 0
+      ? externalIncentives
+      : INITIAL_INCENTIVES
   );
   const [showIncentiveForm, setShowIncentiveForm] = useState(false);
   const [incPlatform, setIncPlatform] = useState('Swiggy');
@@ -158,13 +164,27 @@ export default function FinancialCalendarView({
   const [incExpiry, setIncExpiry] = useState('2026-12-31');
   const [incVerified, setIncVerified] = useState(true);
 
-  // Actual Historical Earnings connected to Supabase payout_logs
-  const [historicalWeeks, setHistoricalWeeks] = useState<WeeklyEarningsRecord[]>(
+  // Actual Historical Earnings connected to Supabase payout_logs & external screenshot uploads
+  const [internalWeeks, setInternalWeeks] = useState<WeeklyEarningsRecord[]>(
     INITIAL_WEEKLY_RECORDS
   );
-  const [monthlyEssentials, setMonthlyEssentials] = useState<number>(
-    Math.max(10000, Math.round(weeklyObligations * 4))
-  );
+  const historicalWeeks = useMemo(() => {
+    if (!externalWeeks || externalWeeks.length === 0) return internalWeeks;
+    const byKey = new Map<string, WeeklyEarningsRecord>();
+    for (const w of internalWeeks) byKey.set(w.weekKey, w);
+    for (const w of externalWeeks) byKey.set(w.weekKey, w);
+    return Array.from(byKey.values());
+  }, [externalWeeks, internalWeeks]);
+
+  useEffect(() => {
+    if (!externalIncentives || externalIncentives.length === 0) return;
+    setIncentives((prev) => {
+      const known = new Set(prev.map((i) => i.id));
+      const added = externalIncentives.filter((i) => !known.has(i.id));
+      return added.length > 0 ? [...added, ...prev] : prev;
+    });
+  }, [externalIncentives]);
+
   const [lockingVault, setLockingVault] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
@@ -257,7 +277,7 @@ export default function FinancialCalendarView({
     }
 
     if (extras.length > 0) {
-      setHistoricalWeeks([...INITIAL_WEEKLY_RECORDS, ...extras]);
+      setInternalWeeks([...INITIAL_WEEKLY_RECORDS, ...extras]);
     }
   }, []);
 
@@ -336,16 +356,6 @@ export default function FinancialCalendarView({
     return activeMonthInsights.reduce((sum, d) => sum + d.recommendedSavings, 0);
   }, [activeMonthInsights]);
 
-  const emergencyFund = useMemo(
-    () =>
-      computeEmergencyFund({
-        monthlyEssentialExpenses: monthlyEssentials,
-        amountSaved: vaultBalance,
-        averageWeeklySavings: Math.round(activeMonthRecommendedSavings / 4),
-      }),
-    [monthlyEssentials, vaultBalance, activeMonthRecommendedSavings]
-  );
-
   const openMonthOrDayDetails = (monthIdx: number, dayNum?: number) => {
     setActiveMonthIdx(monthIdx);
     setSelectedWeekFilter(null);
@@ -405,6 +415,9 @@ export default function FinancialCalendarView({
         : 'Check actual rider app offer.',
     };
     setIncentives((prev) => [newInc, ...prev]);
+    if (onAddIncentiveExternal) {
+      onAddIncentiveExternal(newInc);
+    }
     setShowIncentiveForm(false);
     setStatusMessage(
       `Saved ${newInc.platformName} incentive for ${newInc.applicableDate}.`
@@ -519,7 +532,7 @@ export default function FinancialCalendarView({
         });
       }
 
-      setHistoricalWeeks((prev) => [...prev, rec]);
+      setInternalWeeks((prev) => [...prev, rec]);
       setShowLogWeekModal(false);
       setStatusMessage(
         `Recorded ${rec.weekLabel} (${formatINR(rec.totalEarnings)}). Calendar income predictions updated automatically.`
@@ -930,11 +943,21 @@ export default function FinancialCalendarView({
 
               <button
                 type="button"
-                onClick={() => setShowLogWeekModal(true)}
+                onClick={() =>
+                  onRequestUploadScreenshot
+                    ? onRequestUploadScreenshot()
+                    : setShowLogWeekModal(true)
+                }
                 className="inline-flex min-h-[34px] sm:min-h-[38px] items-center gap-1.5 rounded-lg bg-[#047857] px-2.5 sm:px-3.5 py-1 text-[11px] sm:text-xs font-semibold text-white transition-colors hover:bg-[#065F46] whitespace-nowrap shrink-0"
               >
-                <Plus className="h-3.5 w-3.5 shrink-0" />
-                <span>Record Earnings</span>
+                {onRequestUploadScreenshot ? (
+                  <Upload className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <Plus className="h-3.5 w-3.5 shrink-0" />
+                )}
+                <span>
+                  {onRequestUploadScreenshot ? 'Upload Screenshot' : 'Record Earnings'}
+                </span>
               </button>
             </div>
           </div>
@@ -1650,17 +1673,6 @@ export default function FinancialCalendarView({
             </button>
             <button
               type="button"
-              onClick={() => setPlannerTab('weather')}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
-                plannerTab === 'weather'
-                  ? 'bg-white text-slate-900 shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              IMD Weather Normals
-            </button>
-            <button
-              type="button"
               onClick={() => setPlannerTab('festivals')}
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
                 plannerTab === 'festivals'
@@ -1673,8 +1685,8 @@ export default function FinancialCalendarView({
           </div>
 
           <span className="text-[11px] text-slate-500">
-            Data sources: IMD 1991–2020 Normals · Bengaluru Calendar 2026–2027 ·
-            Rider Actuals ({historicalWeeks.length} wks)
+            Adaptive forecast: Bengaluru Calendar 2026–2027 · Rider Actuals (
+            {historicalWeeks.length} wks)
           </span>
         </div>
 
@@ -1757,68 +1769,44 @@ export default function FinancialCalendarView({
             <div className="space-y-4 lg:col-span-5">
               <div className="rounded-xl border border-slate-200 p-5">
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 text-emerald-700 shrink-0" />
-                    <h3 className="text-sm font-semibold text-slate-900">
-                      Emergency Fund Target
-                    </h3>
-                  </div>
-                  <label className="flex items-center gap-1.5 text-xs text-slate-500">
-                    <span>Monthly essentials:</span>
-                    <input
-                      type="number"
-                      min={4000}
-                      step={500}
-                      value={monthlyEssentials}
-                      onChange={(e) =>
-                        setMonthlyEssentials(
-                          Math.max(4000, Number(e.target.value) || 4000)
-                        )
-                      }
-                      className="w-24 rounded border border-slate-200 px-2 py-0.5 font-mono text-xs text-slate-900 tabular-nums"
-                    />
-                  </label>
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Adaptive Weekday Pattern ({learnedBaseline.weekCount} wks)
+                  </h3>
+                  <span className="font-mono text-xs font-semibold text-emerald-700 tabular-nums">
+                    Next wk: {formatINR(learnedBaseline.predictedNextWeekLow)}–
+                    {formatINR(learnedBaseline.predictedNextWeekHigh)}
+                  </span>
                 </div>
 
-                <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
-                  <div
-                    className="h-full rounded-full bg-[#047857] transition-all duration-300"
-                    style={{ width: `${emergencyFund.progressPct}%` }}
-                  />
-                </div>
-
-                <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                  <div>
-                    <p className="text-slate-500">Target (2 mo)</p>
-                    <p className="font-mono font-semibold text-slate-900 tabular-nums">
-                      {formatINR(emergencyFund.targetAmount)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-slate-500">Vault Saved</p>
-                    <p className="font-mono font-semibold text-emerald-700 tabular-nums">
-                      {formatINR(emergencyFund.amountSaved)}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-slate-500">Remaining</p>
-                    <p className="font-mono font-semibold text-slate-900 tabular-nums">
-                      {formatINR(emergencyFund.remainingAmount)}
-                    </p>
-                  </div>
+                <div className="mt-3 divide-y divide-slate-100 text-xs">
+                  {learnedBaseline.weekdayStats.map((stat) => (
+                    <div
+                      key={stat.day}
+                      className="flex items-center justify-between gap-2 py-2"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-medium text-slate-900">
+                          {stat.shortDay}
+                        </span>
+                        <span className="mx-1.5 text-slate-300">·</span>
+                        <span className="text-slate-500">{stat.patternLabel}</span>
+                      </div>
+                      <span className="font-mono font-semibold text-slate-900 tabular-nums shrink-0">
+                        {formatINR(stat.average)}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
               <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-xs text-amber-900">
                 <p className="font-semibold">
-                  Low-Income &amp; Monsoon Preparedness ({lowIncomeMonthsCount}{' '}
-                  slower months flagged)
+                  Slower-Month Readiness ({lowIncomeMonthsCount} slower months flagged)
                 </p>
                 <p className="mt-1 leading-relaxed">
-                  February and monsoon months (June–September, peaking at 208.3
-                  mm rainfall in September) carry lower weekday demand or rain
-                  delays. Save ~{formatINR(activeMonthRecommendedSavings)} during
-                  stronger weeks in {activeMonth.monthName} to stay protected.
+                  February and monsoon months carry lower weekday demand or rain
+                  delays. Shield ~{formatINR(activeMonthRecommendedSavings)} during
+                  stronger weeks in {activeMonth.monthName} to stay ahead of bills.
                 </p>
               </div>
             </div>
@@ -2028,73 +2016,7 @@ export default function FinancialCalendarView({
           </div>
         )}
 
-        {/* TAB 3: IMD 1991–2020 WEATHER NORMALS */}
-        {plannerTab === 'weather' && (
-          <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-12">
-            <div className="overflow-x-auto lg:col-span-7">
-              <table className="w-full border-collapse text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                    <th className="px-3 py-2.5 font-semibold">Month</th>
-                    <th className="px-3 py-2.5 text-right font-semibold">
-                      IMD Normal Rainfall
-                    </th>
-                    <th className="px-3 py-2.5 font-semibold">Riding Advisory</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {IMD_RAINFALL_NORMALS.map((row) => (
-                    <tr key={row.month}>
-                      <td className="px-3 py-2 font-medium text-slate-900">
-                        {row.month}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono font-semibold text-slate-900 tabular-nums">
-                        {row.rainfallMm.toFixed(1)} mm
-                      </td>
-                      <td className="px-3 py-2 text-slate-600">{row.alert}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="space-y-3 text-xs lg:col-span-5">
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                <div className="flex items-center gap-2 font-semibold text-slate-900">
-                  <CloudRain className="h-4 w-4 text-[#3B82F6]" />
-                  <span>Seasonal Bengaluru Weather Alerts</span>
-                </div>
-                <ul className="mt-2.5 space-y-1.5 text-slate-600">
-                  <li>
-                    <strong>March–May:</strong> Heat and dehydration warnings.
-                  </li>
-                  <li>
-                    <strong>April–May:</strong> Pre-monsoon thunderstorms.
-                  </li>
-                  <li>
-                    <strong>June–September:</strong> Monsoon and slippery roads.
-                  </li>
-                  <li>
-                    <strong>September–October:</strong> Higher rainfall and
-                    waterlogging risk.
-                  </li>
-                  <li>
-                    <strong>November–February:</strong> Relatively dry riding
-                    conditions.
-                  </li>
-                </ul>
-              </div>
-              <p className="text-[11px] leading-relaxed text-slate-500">
-                Source: India Meteorological Department (IMD) Bengaluru Climate
-                Normals (1991–2020). These are historical monthly averages, not
-                live forecasts—always verify real-time weather radar before
-                starting your shift.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 4: UPDATE FESTIVAL / ISLAMIC HOLIDAY DATES */}
+        {/* TAB 3: UPDATE FESTIVAL / ISLAMIC HOLIDAY DATES */}
         {plannerTab === 'festivals' && (
           <div className="mt-5 space-y-3">
             <p className="text-xs text-slate-600">

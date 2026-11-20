@@ -20,6 +20,11 @@ create table public.riders (
   target_payout numeric(10,2) not null default 6000.00,
   safety_reserve numeric(10,2) not null default 2000.00,
   weekly_obligations numeric(10,2) not null default 3900.00,
+  monthly_fixed_bills numeric(10,2) not null default 12000.00,
+  bill_due_day integer not null default 5 check (bill_due_day >= 1 and bill_due_day <= 31),
+  daily_fuel_spend numeric(10,2) not null default 250.00,
+  preferred_language text not null default 'kn-IN' check (preferred_language in ('kn-IN', 'hi-IN', 'en-IN')),
+  bill_setup_completed boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -54,7 +59,6 @@ create table public.payout_logs (
   safe_daily_spend numeric(10,2) not null default 550,
   daily_breakdown jsonb not null default '[]'::jsonb,
   kannada_summary text,
-  image_url text,
   created_at timestamptz not null default now()
 );
 

@@ -105,21 +105,6 @@ export interface DayInsight {
   } | null;
 }
 
-export const IMD_RAINFALL_NORMALS: { month: string; rainfallMm: number; alert: string }[] = [
-  { month: 'January', rainfallMm: 1.6, alert: 'Relatively dry riding conditions' },
-  { month: 'February', rainfallMm: 7.1, alert: 'Relatively dry riding conditions; warming afternoons' },
-  { month: 'March', rainfallMm: 14.7, alert: 'Heat and dehydration warnings begin' },
-  { month: 'April', rainfallMm: 61.7, alert: 'Heat, dehydration & pre-monsoon thunderstorms' },
-  { month: 'May', rainfallMm: 128.7, alert: 'Heat exposure & pre-monsoon thunderstorms' },
-  { month: 'June', rainfallMm: 110.3, alert: 'Monsoon onset and slippery roads' },
-  { month: 'July', rainfallMm: 116.4, alert: 'Monsoon and slippery roads' },
-  { month: 'August', rainfallMm: 162.7, alert: 'Monsoon, rain delays and slippery roads' },
-  { month: 'September', rainfallMm: 208.3, alert: 'Peak rainfall, waterlogging risk & slippery roads' },
-  { month: 'October', rainfallMm: 186.4, alert: 'Higher rainfall and waterlogging risk' },
-  { month: 'November', rainfallMm: 64.5, alert: 'Relatively dry riding conditions returning' },
-  { month: 'December', rainfallMm: 15.4, alert: 'Relatively dry riding conditions' },
-];
-
 export const BENGALURU_13_MONTH_PLAN: MonthCalendarPlan[] = [
   {
     id: '2026-10',

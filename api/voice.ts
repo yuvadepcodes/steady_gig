@@ -1,4 +1,9 @@
-import { executeVoicePipeline, readVaultStatusAloud } from '../lib/voice-pipeline';
+import {
+  executeOnboardingStepVoice,
+  executeVoicePipeline,
+  normalizeLanguageCode,
+  readVaultStatusAloud,
+} from '../lib/voice-pipeline';
 
 export const config = {
   maxDuration: 30,
@@ -18,19 +23,23 @@ export async function OPTIONS() {
 }
 
 /**
- * Web Standard POST Handler (Next.js App Router / Vercel Edge & Serverless Functions)
+ * Web Standard POST Handler (Next.js App Router)
  */
 export async function POST(request: Request): Promise<Response> {
   try {
     const contentType = request.headers.get('content-type') || '';
 
-    // Check for JSON request (e.g. read_vault demo action)
     if (contentType.includes('application/json')) {
       const body = await request.json();
-      const userId = body.userId || body.riderId || request.headers.get('x-user-id') || 'rider_blr_01';
+      const userId =
+        body.userId ||
+        body.riderId ||
+        request.headers.get('x-user-id') ||
+        'rider_blr_01';
+      const languageCode = normalizeLanguageCode(body.languageCode);
 
       if (body.action === 'read_vault') {
-        const result = await readVaultStatusAloud(userId);
+        const result = await readVaultStatusAloud(userId, languageCode);
         return Response.json(result, { status: 200, headers: CORS_HEADERS });
       }
     }
@@ -39,7 +48,7 @@ export async function POST(request: Request): Promise<Response> {
       return Response.json(
         {
           error:
-            'Invalid Content-Type. Expected multipart/form-data with audio "file" and optional "userId", or application/json with action "read_vault".',
+            'Invalid Content-Type. Expected multipart/form-data with audio "file", or application/json with action "read_vault".',
         },
         { status: 400, headers: CORS_HEADERS }
       );
@@ -52,6 +61,10 @@ export async function POST(request: Request): Promise<Response> {
       (formData.get('riderId') as string) ||
       request.headers.get('x-user-id') ||
       'rider_blr_01';
+    const languageCode = normalizeLanguageCode(
+      formData.get('languageCode') as string | null
+    );
+    const mode = (formData.get('mode') as string) || 'assistant';
 
     if (!file) {
       return Response.json(
@@ -60,52 +73,43 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const result = await executeVoicePipeline(file, userId);
+    if (mode === 'onboarding_step') {
+      const stepRaw = Number(formData.get('step') || 1);
+      const step = (
+        stepRaw === 2 || stepRaw === 3 || stepRaw === 4 ? stepRaw : 1
+      ) as 1 | 2 | 3 | 4;
+
+      const onboardingResult = await executeOnboardingStepVoice({
+        audioBlob: file,
+        step,
+        languageCode,
+      });
+
+      return Response.json(onboardingResult, {
+        status: 200,
+        headers: CORS_HEADERS,
+      });
+    }
+
+    const result = await executeVoicePipeline(file, userId, languageCode);
 
     return Response.json(result, {
       status: 200,
       headers: CORS_HEADERS,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[SteadyGig Voice API Error]:', error);
     return Response.json(
       {
-        error: error.message || 'Voice assistant pipeline processing failed.',
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Voice assistant pipeline processing failed.',
       },
       {
         status: 500,
         headers: CORS_HEADERS,
       }
     );
-  }
-}
-
-/**
- * Node HTTP Handler fallback for legacy Vercel Serverless Function invocations
- */
-export default async function handler(req: any, res: any) {
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-user-id');
-    return res.status(204).end();
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed. Use POST.' });
-  }
-
-  try {
-    if (typeof req.formData === 'function') {
-      const response = await POST(req);
-      const data = await response.json();
-      return res.status(response.status).json(data);
-    }
-
-    return res.status(400).json({
-      error: 'Please use multipart/form-data POST to /api/voice.',
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Server error' });
   }
 }

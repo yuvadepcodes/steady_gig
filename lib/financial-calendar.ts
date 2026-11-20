@@ -124,15 +124,6 @@ export interface LearnedPatternSummary {
   lowIncomePeriods: string[];
 }
 
-export interface EmergencyFundStatus {
-  monthlyEssentialExpenses: number;
-  targetAmount: number;
-  amountSaved: number;
-  remainingAmount: number;
-  progressPct: number;
-  estimatedWeeksToGoal: number | null;
-}
-
 /**
  * Splits weekly order_payout, incentives, total_orders, single_runs, multi_runs
  * proportionally across the 7 days so daily numbers reconcile cleanly to exact weekly totals.
@@ -736,33 +727,6 @@ export function computeWeekPlan(
         essentialProtected,
       },
     },
-  };
-}
-
-export function computeEmergencyFund(params: {
-  monthlyEssentialExpenses: number;
-  amountSaved: number;
-  averageWeeklySavings: number;
-}): EmergencyFundStatus {
-  // Recommended gig emergency buffer = 2 months of essential expenses
-  const targetAmount = Math.max(1000, Math.round(params.monthlyEssentialExpenses * 2));
-  const amountSaved = Math.max(0, Math.round(params.amountSaved));
-  const remainingAmount = Math.max(0, targetAmount - amountSaved);
-  const progressPct = Math.min(100, Math.round((amountSaved / targetAmount) * 100));
-  const estimatedWeeksToGoal =
-    remainingAmount === 0
-      ? 0
-      : params.averageWeeklySavings > 0
-      ? Math.ceil(remainingAmount / params.averageWeeklySavings)
-      : null;
-
-  return {
-    monthlyEssentialExpenses: params.monthlyEssentialExpenses,
-    targetAmount,
-    amountSaved,
-    remainingAmount,
-    progressPct,
-    estimatedWeeksToGoal,
   };
 }
 
