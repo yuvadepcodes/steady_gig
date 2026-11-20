@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import { JetBrains_Mono, Plus_Jakarta_Sans } from 'next/font/google';
 import './globals.css';
+import SarvamVoiceAssistant from '@/src/components/SarvamVoiceAssistant';
 
 const jakarta = Plus_Jakarta_Sans({
   subsets: ['latin'],
@@ -38,6 +39,7 @@ export default function RootLayout({
     >
       <body className="min-h-screen bg-[#090D16] text-[#F9FAFB] antialiased">
         {children}
+        <SarvamVoiceAssistant />
       </body>
     </html>
   );
