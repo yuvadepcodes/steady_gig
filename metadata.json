@@ -1,0 +1,6 @@
+{
+  "name": "SteadyGig",
+  "description": "Voice-first, vision-powered Kannada financial co-pilot and cash-flow smoothing vault for Bengaluru gig delivery riders.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
