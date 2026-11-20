@@ -2,14 +2,14 @@
 
 @layer base {
   html {
-    background-color: #090d16;
-    color: #f9fafb;
-    color-scheme: dark;
+    background-color: #f8fafc;
+    color: #0f172a;
+    color-scheme: light;
   }
 
   body {
-    background-color: #090d16;
-    color: #f9fafb;
+    background-color: #f8fafc;
+    color: #0f172a;
     font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
   }
 

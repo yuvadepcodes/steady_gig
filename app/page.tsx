@@ -1,3 +1,5 @@
+import MinimalRiderHome from '@/src/components/MinimalRiderHome';
+
 export default function HomePage() {
-  return <main className="min-h-screen bg-[#090D16]" />;
+  return <MinimalRiderHome />;
 }

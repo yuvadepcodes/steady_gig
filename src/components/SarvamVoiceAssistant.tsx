@@ -8,18 +8,18 @@ import {
   Loader2,
   Volume2,
   X,
-  Sparkles,
   CheckCircle2,
   Fuel,
   Utensils,
   Home,
   ShieldCheck,
   RotateCcw,
+  Sparkles,
 } from 'lucide-react';
 
 interface VoiceAssistantProps {
   userId?: string;
-  onMutation?: (action: any) => void;
+  onMutation?: (action: ActionData) => void;
 }
 
 interface ActionData {
@@ -38,14 +38,12 @@ export default function SarvamVoiceAssistant({
 }: VoiceAssistantProps) {
   const router = useRouter();
 
-  // State
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Transcript & speech bubble state
   const [transcript, setTranscript] = useState<string | null>(null);
   const [replyText, setReplyText] = useState<string | null>(null);
   const [actionData, setActionData] = useState<ActionData | null>(null);
@@ -53,13 +51,11 @@ export default function SarvamVoiceAssistant({
   const [showBubble, setShowBubble] = useState(false);
   const [showDrawer, setShowDrawer] = useState(false);
 
-  // Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
 
-  // Cleanup timers & audio on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
@@ -70,7 +66,6 @@ export default function SarvamVoiceAssistant({
     };
   }, []);
 
-  // Play audio from base64 string
   const playAudioBase64 = (base64String: string) => {
     try {
       if (audioPlayerRef.current) {
@@ -85,35 +80,35 @@ export default function SarvamVoiceAssistant({
       audioPlayerRef.current = audio;
       setIsPlayingAudio(true);
 
-      audio.onended = () => {
-        setIsPlayingAudio(false);
-      };
+      audio.onended = () => setIsPlayingAudio(false);
+      audio.onerror = () => setIsPlayingAudio(false);
 
-      audio.onerror = () => {
-        setIsPlayingAudio(false);
-      };
-
-      audio.play().catch((err) => {
-        console.warn('[SarvamVoiceAssistant] Auto-play was prevented by browser policy:', err);
+      audio.play().catch(() => {
         setIsPlayingAudio(false);
       });
-    } catch (err) {
-      console.error('[SarvamVoiceAssistant] Audio playback error:', err);
+    } catch {
       setIsPlayingAudio(false);
     }
   };
 
-  // Start Voice Recording
   const startRecording = async () => {
     try {
       setErrorMessage(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      // Determine supported mimeType
-      const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/wav'];
-      const mimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/wav',
+      ];
+      const mimeType =
+        mimeTypes.find((type) => MediaRecorder.isTypeSupported(type)) || '';
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      const recorder = new MediaRecorder(
+        stream,
+        mimeType ? { mimeType } : undefined
+      );
       mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
 
@@ -131,21 +126,21 @@ export default function SarvamVoiceAssistant({
         await sendAudioToPipeline(audioBlob);
       };
 
-      recorder.start(250); // Slice chunks every 250ms
+      recorder.start(250);
       setIsRecording(true);
       setRecordingSeconds(0);
 
       timerRef.current = setInterval(() => {
         setRecordingSeconds((prev) => prev + 1);
       }, 1000);
-    } catch (err: any) {
-      console.error('[SarvamVoiceAssistant] Mic access error:', err);
-      setErrorMessage('ಮೈಕ್ರೊಫೋನ್ ಅನುಮತಿ ನೀಡಿ / Please allow microphone access.');
+    } catch {
+      setErrorMessage(
+        'ಮೈಕ್ರೊಫೋನ್ ಅನುಮತಿ ನೀಡಿ · Allow microphone access to speak.'
+      );
       setIsRecording(false);
     }
   };
 
-  // Stop Recording
   const stopRecording = () => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -158,7 +153,6 @@ export default function SarvamVoiceAssistant({
     }
   };
 
-  // Send Audio to /api/voice
   const sendAudioToPipeline = async (audioBlob: Blob) => {
     setIsProcessing(true);
     setErrorMessage(null);
@@ -175,7 +169,9 @@ export default function SarvamVoiceAssistant({
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}));
-        throw new Error(errJson.error || `Voice request failed with status ${response.status}`);
+        throw new Error(
+          errJson.error || `Voice request failed (${response.status})`
+        );
       }
 
       const data = await response.json();
@@ -186,12 +182,10 @@ export default function SarvamVoiceAssistant({
       setAudioBase64(data.audioBase64 || null);
       setShowBubble(true);
 
-      // Trigger automatic spoken audio playback
       if (data.audioBase64) {
         playAudioBase64(data.audioBase64);
       }
 
-      // Refresh Dashboard and Supabase state
       if (data.action) {
         window.dispatchEvent(
           new CustomEvent('steadygig:refresh', { detail: data.action })
@@ -204,15 +198,17 @@ export default function SarvamVoiceAssistant({
         }
         router.refresh();
       }
-    } catch (err: any) {
-      console.error('[SarvamVoiceAssistant] Pipeline error:', err);
-      setErrorMessage(err.message || 'ಧ್ವನಿ ಸಂಸ್ಕರಣೆ ವಿಫಲವಾಗಿದೆ / Voice processing failed.');
+    } catch (err: unknown) {
+      setErrorMessage(
+        err instanceof Error
+          ? err.message
+          : 'ಧ್ವನಿ ಸಂಸ್ಕರಣೆ ವಿಫಲವಾಗಿದೆ · Voice processing failed.'
+      );
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // Hackathon Judge Demo: Read Vault Status Aloud
   const handleReadVaultStatusAloud = async () => {
     setIsProcessing(true);
     setErrorMessage(null);
@@ -220,9 +216,7 @@ export default function SarvamVoiceAssistant({
     try {
       const response = await fetch('/api/voice', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'read_vault',
           userId,
@@ -234,7 +228,7 @@ export default function SarvamVoiceAssistant({
       }
 
       const data = await response.json();
-      setTranscript(data.transcript || 'ವಾಲ್ಟ್ ಸ್ಥಿತಿ ಪರಿಶೀಲನೆ (Vault Check)');
+      setTranscript(data.transcript || 'Vault Status Check');
       setReplyText(data.replyText || '');
       setActionData(data.action || null);
       setAudioBase64(data.audioBase64 || null);
@@ -245,15 +239,15 @@ export default function SarvamVoiceAssistant({
       }
 
       router.refresh();
-    } catch (err: any) {
-      console.error('[SarvamVoiceAssistant] Read vault status error:', err);
-      setErrorMessage('ವಾಲ್ಟ್ ಸ್ಥಿತಿ ಓದಲು ಸಾಧ್ಯವಾಗಿಲ್ಲ / Could not read vault status.');
+    } catch {
+      setErrorMessage(
+        'ವಾಲ್ಟ್ ಸ್ಥಿತಿ ಓದಲು ಸಾಧ್ಯವಾಗಿಲ್ಲ · Could not read vault status.'
+      );
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // Format recording timer
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60);
     const s = secs % 60;
@@ -261,199 +255,182 @@ export default function SarvamVoiceAssistant({
   };
 
   return (
-    <div className="fixed bottom-5 right-5 sm:bottom-6 sm:right-6 z-50 flex flex-col items-end gap-3 pointer-events-none select-none">
-      {/* Speech Bubble Card */}
+    <div className="fixed right-4 bottom-4 sm:right-6 sm:bottom-6 z-50 flex flex-col items-end gap-2.5 pointer-events-none select-none">
+      {/* Clean Minimal Response Card */}
       {showBubble && replyText && (
-        <div className="pointer-events-auto w-[340px] sm:w-[380px] bg-[#0A101D]/95 backdrop-blur-xl border border-amber-500/30 rounded-2xl p-4 shadow-2xl shadow-black/80 flex flex-col gap-2.5 transition-all duration-200 animate-in fade-in slide-in-from-bottom-3">
-          {/* Header */}
-          <div className="flex items-center justify-between pb-2 border-b border-white/10">
-            <div className="flex items-center gap-2">
-              <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-xs font-semibold tracking-wide text-amber-400 uppercase">
-                {actionData?.intent === 'LOG_EXPENSE' ? (
-                  <span className="flex items-center gap-1 text-emerald-400">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    ಖರ್ಚು ದಾಖಲಾಗಿದೆ / Expense Logged
-                  </span>
-                ) : actionData?.intent === 'SIMULATE_PAYOUT' ? (
-                  <span className="flex items-center gap-1 text-sky-400">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    ಪೇಔಟ್ ಮಾಹಿತಿ / Payout Simulation
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-amber-400">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    ವಾಲ್ಟ್ ಸ್ಥಿತಿ / Vault Status
-                  </span>
-                )}
-              </span>
+        <div className="pointer-events-auto w-[336px] sm:w-[380px] rounded-xl border border-slate-200 bg-white p-4 shadow-lg">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+              {actionData?.intent === 'LOG_EXPENSE' ? (
+                <>
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                  <span>ಖರ್ಚು ದಾಖಲಾಗಿದೆ · Expense Logged</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
+                  <span>ವಾಲ್ಟ್ ಸ್ಥಿತಿ · Vault Status</span>
+                </>
+              )}
             </div>
 
             <button
+              type="button"
               onClick={() => setShowBubble(false)}
-              className="text-gray-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors"
-              title="Close"
+              aria-label="Close voice reply"
+              className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
             >
-              <X className="w-4 h-4" />
+              <X className="h-4 w-4" />
             </button>
           </div>
 
-          {/* User Spoken Transcript */}
           {transcript && (
-            <div className="text-xs text-gray-400 bg-white/5 rounded-lg px-2.5 py-1.5 border border-white/5 italic">
-              <span className="font-semibold text-gray-300 not-italic mr-1">Rider:</span>
-              &ldquo;{transcript}&rdquo;
-            </div>
+            <p className="mt-2.5 text-xs text-slate-500">
+              <span className="font-medium text-slate-700">Rider:</span> “
+              {transcript}”
+            </p>
           )}
 
-          {/* Assistant Kannada Reply */}
-          <div className="text-sm font-medium text-white leading-relaxed bg-amber-500/10 border border-amber-500/20 rounded-xl p-3">
+          <div className="mt-2.5 rounded-lg bg-slate-50 p-3 text-sm leading-relaxed text-slate-900">
             <div className="flex items-start gap-2">
               <Volume2
-                className={`w-4 h-4 mt-0.5 shrink-0 text-amber-400 ${
-                  isPlayingAudio ? 'animate-bounce text-emerald-400' : ''
+                className={`mt-0.5 h-4 w-4 shrink-0 ${
+                  isPlayingAudio ? 'text-emerald-600' : 'text-slate-500'
                 }`}
               />
-              <p className="text-amber-100 font-sans">{replyText}</p>
+              <p>{replyText}</p>
             </div>
           </div>
 
-          {/* Mutation Impact Preview */}
           {actionData?.intent === 'LOG_EXPENSE' && actionData.amount && (
-            <div className="flex items-center justify-between text-xs bg-black/40 rounded-lg px-3 py-2 border border-white/10">
-              <div className="flex items-center gap-1.5 text-gray-300">
+            <div className="mt-2.5 flex items-center justify-between border-t border-slate-100 pt-2.5 text-xs">
+              <div className="flex items-center gap-1.5 text-slate-600">
                 {actionData.category === 'food' ? (
-                  <Utensils className="w-3.5 h-3.5 text-amber-400" />
+                  <Utensils className="h-3.5 w-3.5 text-slate-500" />
                 ) : actionData.category === 'rent' ? (
-                  <Home className="w-3.5 h-3.5 text-sky-400" />
+                  <Home className="h-3.5 w-3.5 text-slate-500" />
                 ) : (
-                  <Fuel className="w-3.5 h-3.5 text-orange-400" />
+                  <Fuel className="h-3.5 w-3.5 text-slate-500" />
                 )}
-                <span className="capitalize">{actionData.category || 'Expense'}:</span>
-                <span className="font-bold text-white">₹{actionData.amount}</span>
+                <span className="capitalize">{actionData.category || 'Expense'}</span>
+                <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                  ₹{actionData.amount}
+                </span>
               </div>
 
               {typeof actionData.updatedBalance === 'number' && (
-                <div className="text-emerald-400 font-mono text-[11px]">
-                  Balance: ₹{actionData.updatedBalance.toLocaleString('en-IN')}
-                </div>
+                <span className="font-mono font-medium text-emerald-700 tabular-nums">
+                  Balance ₹{actionData.updatedBalance.toLocaleString('en-IN')}
+                </span>
               )}
             </div>
           )}
 
-          {/* Actions Footer */}
-          <div className="flex items-center justify-between pt-1 text-[11px] text-gray-400">
-            <span className="flex items-center gap-1">
-              {isPlayingAudio ? (
-                <span className="text-emerald-400 font-medium animate-pulse">
-                  ಧ್ವನಿ ನುಡಿಯುತ್ತಿದೆ... / Playing audio...
-                </span>
-              ) : (
-                <span className="text-gray-400">Sarvam AI + Gemini</span>
-              )}
+          <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-400">
+            <span>
+              {isPlayingAudio ? 'Playing Kannada reply...' : 'Sarvam AI + Gemini'}
             </span>
-
             {audioBase64 && (
               <button
+                type="button"
                 onClick={() => playAudioBase64(audioBase64)}
                 disabled={isPlayingAudio}
-                className="flex items-center gap-1 text-amber-400 hover:text-amber-300 font-medium px-2 py-1 rounded bg-amber-400/10 hover:bg-amber-400/20 transition-colors disabled:opacity-50"
+                className="inline-flex items-center gap-1 font-medium text-emerald-700 hover:text-emerald-800 disabled:opacity-50"
               >
-                <RotateCcw className="w-3 h-3" />
-                ಮತ್ತೆ ಕೇಳಿ / Replay
+                <RotateCcw className="h-3 w-3" />
+                <span>Replay</span>
               </button>
             )}
           </div>
         </div>
       )}
 
-      {/* Error Toast */}
       {errorMessage && (
-        <div className="pointer-events-auto bg-red-950/90 border border-red-500/40 text-red-200 text-xs rounded-xl px-3.5 py-2.5 shadow-xl max-w-xs flex items-center justify-between gap-2">
+        <div
+          role="alert"
+          className="pointer-events-auto flex max-w-xs items-center justify-between gap-2 rounded-xl border border-rose-200 bg-white px-3.5 py-2.5 text-xs text-rose-700 shadow-md"
+        >
           <span>{errorMessage}</span>
           <button
+            type="button"
             onClick={() => setErrorMessage(null)}
-            className="text-red-400 hover:text-white"
+            aria-label="Dismiss error"
+            className="text-rose-400 hover:text-rose-700"
           >
-            <X className="w-3.5 h-3.5" />
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
       )}
 
-      {/* Secondary Demo Drawer Toggle */}
-      <div className="pointer-events-auto flex items-center gap-2">
-        <button
-          onClick={() => setShowDrawer((prev) => !prev)}
-          className="bg-[#0B132B]/90 hover:bg-[#121E42] text-amber-400 hover:text-amber-300 border border-amber-500/30 rounded-full px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur-md transition-all flex items-center gap-1.5"
-          title="Demo Options"
-        >
-          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-          <span>Demo Controls</span>
-        </button>
-
+      {/* Demo Controls Drawer Row */}
+      <div className="pointer-events-auto flex flex-wrap items-center justify-end gap-2">
         {showDrawer && (
           <button
+            type="button"
             onClick={handleReadVaultStatusAloud}
             disabled={isProcessing || isRecording}
-            className="bg-amber-500 hover:bg-amber-400 active:scale-95 text-gray-950 font-bold px-3.5 py-1.5 rounded-full text-xs shadow-lg shadow-amber-500/20 transition-all flex items-center gap-1.5 disabled:opacity-50"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-emerald-200 bg-white px-3.5 py-2 text-xs font-semibold text-emerald-700 shadow-sm transition-colors hover:bg-emerald-50 disabled:opacity-50 whitespace-nowrap shrink-0"
           >
-            <Volume2 className="w-3.5 h-3.5" />
+            <Volume2 className="h-3.5 w-3.5 shrink-0" />
             <span>ವಾಲ್ಟ್ ಸ್ಥಿತಿ ಕೇಳಿ / Read Vault Status</span>
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={() => setShowDrawer((prev) => !prev)}
+          aria-expanded={showDrawer}
+          className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium shadow-sm transition-colors whitespace-nowrap shrink-0 ${
+            showDrawer
+              ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+          }`}
+        >
+          <Sparkles className="h-3.5 w-3.5 text-emerald-700 shrink-0" />
+          <span>Demo Controls</span>
+        </button>
       </div>
 
-      {/* Main High-Contrast Floating Mic Button */}
-      <div className="pointer-events-auto flex items-center gap-3">
+      {/* Primary Mic Action Row */}
+      <div className="pointer-events-auto flex items-center gap-2">
         {isRecording && (
-          <div className="bg-red-950/90 border border-red-500/50 rounded-full px-3.5 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-md animate-pulse">
-            <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
-            <span className="text-xs font-mono font-bold text-red-200">
+          <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs font-medium text-rose-700 shadow-sm">
+            <span className="h-2 w-2 rounded-full bg-rose-600 animate-pulse" />
+            <span className="font-mono tabular-nums">
               {formatTime(recordingSeconds)}
-            </span>
-            <span className="text-xs text-red-300 font-medium">ಧ್ವನಿ ರೆಕಾರ್ಡ್ ಆಗುತ್ತಿದೆ...</span>
-          </div>
-        )}
-
-        {isProcessing && (
-          <div className="bg-[#0A101D]/90 border border-amber-500/40 rounded-full px-3.5 py-1.5 flex items-center gap-2 shadow-lg backdrop-blur-md">
-            <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin" />
-            <span className="text-xs text-amber-200 font-medium">
-              ವಿಶ್ಲೇಷಿಸಲಾಗುತ್ತಿದೆ... / Processing...
             </span>
           </div>
         )}
 
         <button
+          type="button"
           onClick={isRecording ? stopRecording : startRecording}
           disabled={isProcessing}
-          aria-label={isRecording ? 'Stop recording' : 'Speak to Sarvam Voice Assistant'}
-          className={`group relative flex items-center gap-2.5 px-4 py-3 sm:px-5 sm:py-3.5 rounded-full font-bold text-sm shadow-2xl transition-all duration-200 active:scale-95 ${
+          aria-label={
             isRecording
-              ? 'bg-gradient-to-r from-red-600 to-amber-600 text-white ring-4 ring-red-500/50 shadow-red-500/30 animate-pulse'
-              : 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-gray-950 shadow-amber-500/25 ring-2 ring-amber-400/40 hover:ring-amber-300'
-          } disabled:opacity-50 disabled:cursor-not-allowed`}
+              ? 'Stop recording'
+              : 'Speak to Kannada Voice Co-Pilot'
+          }
+          className={`inline-flex min-h-[44px] items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold shadow-sm transition-colors whitespace-nowrap shrink-0 ${
+            isRecording
+              ? 'bg-rose-600 text-white hover:bg-rose-700'
+              : 'bg-[#047857] text-white hover:bg-[#065F46]'
+          } disabled:opacity-50`}
         >
           {isRecording ? (
             <>
-              <Square className="w-5 h-5 fill-current" />
-              <span className="tracking-wide">ನಿಲ್ಲಿಸಿ / Stop</span>
+              <Square className="h-4 w-4 fill-current" />
+              <span>Stop</span>
             </>
           ) : isProcessing ? (
             <>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              <span>ಕಾಯಿರಿ... / Wait</span>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>Processing...</span>
             </>
           ) : (
             <>
-              <div className="relative">
-                <Mic className="w-5 h-5 text-gray-950" />
-                <span className="absolute -top-1 -right-1 flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
-              </div>
-              <span className="tracking-wide font-sans">ಮಾತನಾಡಿ / Speak</span>
+              <Mic className="h-4 w-4" />
+              <span>ಮಾತನಾಡಿ · Speak</span>
             </>
           )}
         </button>

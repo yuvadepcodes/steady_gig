@@ -16,13 +16,13 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const viewport: Viewport = {
-  themeColor: '#090D16',
+  themeColor: '#f8fafc',
   width: 'device-width',
   initialScale: 1,
 };
 
 export const metadata: Metadata = {
-  title: 'SteadyGig',
+  title: 'SteadyGig — Rider Cash-Flow Smoothing',
   description:
     'Voice-first, vision-powered financial co-pilot for Bengaluru gig delivery riders.',
 };
@@ -37,7 +37,7 @@ export default function RootLayout({
       lang="en"
       className={`${jakarta.variable} ${jetbrainsMono.variable}`}
     >
-      <body className="min-h-screen bg-[#090D16] text-[#F9FAFB] antialiased">
+      <body className="min-h-screen bg-[#F8FAFC] text-[#0F172A] antialiased">
         {children}
         <SarvamVoiceAssistant />
       </body>
