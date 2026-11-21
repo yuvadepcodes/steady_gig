@@ -17,6 +17,7 @@ import {
   RiderBillProfile,
   SupportedLanguage,
 } from '@/lib/cashflow-slicer';
+import { BrowserVoiceRecorder } from '@/lib/browser-audio';
 
 interface MultilingualOnboardingModalProps {
   open: boolean;
@@ -210,6 +211,7 @@ export default function MultilingualOnboardingModal({
 
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
   const [isProcessingVoice, setIsProcessingVoice] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState<string | null>(null);
@@ -218,8 +220,8 @@ export default function MultilingualOnboardingModal({
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ttsCacheRef = useRef<Record<string, string>>({});
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  const recorderRef = useRef<BrowserVoiceRecorder | null>(null);
+  const isRecordingRef = useRef(false);
 
   useEffect(() => {
     if (open) {
@@ -232,6 +234,12 @@ export default function MultilingualOnboardingModal({
       setVoiceTranscript(null);
       setReadBackText(null);
       setVoiceError(null);
+    } else {
+      recorderRef.current?.cancel();
+      recorderRef.current = null;
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      setMicLevel(0);
     }
   }, [open, profile]);
 
@@ -247,7 +255,10 @@ export default function MultilingualOnboardingModal({
   }, []);
 
   useEffect(() => {
-    return () => stopAnyAudio();
+    return () => {
+      recorderRef.current?.cancel();
+      stopAnyAudio();
+    };
   }, [stopAnyAudio]);
 
   const playBase64Audio = useCallback(
@@ -337,123 +348,58 @@ export default function MultilingualOnboardingModal({
     else setCurrentBalance(clean);
   };
 
-  const clientSpeechRef = useRef<any>(null);
-  const clientTranscriptRef = useRef<string>('');
-
-  const parseClientNumber = (text: string): number | null => {
-    if (!text) return null;
-    const clean = text.replace(/,/g, '');
-    const numMatch = clean.match(/\d+(\.\d+)?/g);
-    if (numMatch && numMatch.length > 0) {
-      const val = parseFloat(numMatch[0]);
-      if (Number.isFinite(val)) return Math.round(val);
-    }
-    const lower = clean.toLowerCase();
-    const lookup: [RegExp, number][] = [
-      [/\b(eighteen thousand|ಹದಿನೆಂಟು ಸಾವಿರ|अठारह हजार)\b/i, 18000],
-      [/\b(fifteen thousand|ಹದಿನೈದು ಸಾವಿರ|पंद्रह हजार)\b/i, 15000],
-      [/\b(twelve thousand|ಹನ್ನೆರಡು ಸಾವಿರ|बारह हजार)\b/i, 12000],
-      [/\b(ten thousand|ಹತ್ತು ಸಾವಿರ|दस हजार)\b/i, 10000],
-      [/\b(nine thousand|ಒಂಬತ್ತು ಸಾವಿರ|नौ हजार)\b/i, 9000],
-      [/\b(eight thousand|ಎಂಟು ಸಾವಿರ|आठ हजार)\b/i, 8000],
-      [/\b(seven thousand|ಏಳು ಸಾವಿರ|सात हजार)\b/i, 7000],
-      [/\b(six thousand|ಆರು ಸಾವಿರ|छह हजार)\b/i, 6000],
-      [/\b(five thousand|ಐದು ಸಾವಿರ|पांच हजार)\b/i, 5000],
-      [/\b(four thousand|ನಾಲ್ಕು ಸಾವಿರ|चार हजार)\b/i, 4000],
-      [/\b(three thousand|ಮೂರು ಸಾವಿರ|तीन हजार)\b/i, 3000],
-      [/\b(two thousand|ಎರಡು ಸಾವಿರ|दो हजार)\b/i, 2000],
-      [/\b(one thousand|ಒಂದು ಸಾವಿರ|एक हजार)\b/i, 1000],
-      [/\b(five hundred|ಐನೂರು|पांच सौ)\b/i, 500],
-      [/\b(two fifty|two hundred fifty|ಇನ್ನೂರ ಐವತ್ತು|ढाई सौ|दो सौ पचास)\b/i, 250],
-      [/\b(two hundred|ಇನ್ನೂರು|दो सौ)\b/i, 200],
-    ];
-    for (const [p, n] of lookup) {
-      if (p.test(lower)) return n;
-    }
-    return null;
-  };
-
   const startVoiceAnswer = async () => {
+    if (isRecordingRef.current || isProcessingVoice) return;
+
     try {
       stopAnyAudio();
       setVoiceError(null);
-      clientTranscriptRef.current = '';
+      setMicLevel(0);
 
-      // Start on-device browser SpeechRecognition in parallel if available
-      if (typeof window !== 'undefined') {
-        const SpeechRec =
-          (window as any).SpeechRecognition ||
-          (window as any).webkitSpeechRecognition;
-        if (SpeechRec) {
-          try {
-            const rec = new SpeechRec();
-            rec.continuous = false;
-            rec.interimResults = true;
-            rec.lang = lang === 'hi-IN' ? 'hi-IN' : lang === 'en-IN' ? 'en-IN' : 'kn-IN';
-            rec.onresult = (ev: any) => {
-              const res = ev.results[ev.results.length - 1];
-              if (res && res[0]) {
-                clientTranscriptRef.current = res[0].transcript;
-              }
-            };
-            rec.start();
-            clientSpeechRef.current = rec;
-          } catch {
-            // Ignore speech recognition startup errors
-          }
-        }
-      }
+      const recorder = new BrowserVoiceRecorder({
+        onLevel: (level) => setMicLevel(level),
+      });
+      await recorder.start();
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mimeTypes = [
-        'audio/webm;codecs=opus',
-        'audio/webm',
-        'audio/mp4',
-        'audio/wav',
-      ];
-      const mimeType =
-        mimeTypes.find((type) => MediaRecorder.isTypeSupported(type)) || '';
-      const recorder = new MediaRecorder(
-        stream,
-        mimeType ? { mimeType } : undefined
-      );
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      recorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size > 0) {
-          audioChunksRef.current.push(ev.data);
-        }
-      };
-
-      recorder.onstop = async () => {
-        const blob = new Blob(audioChunksRef.current, {
-          type: mimeType || 'audio/webm',
-        });
-        stream.getTracks().forEach((t) => t.stop());
-        if (clientSpeechRef.current) {
-          try {
-            clientSpeechRef.current.stop();
-          } catch {
-            // ignore
-          }
-        }
-        await submitVoiceAnswer(blob);
-      };
-
-      recorder.start(250);
+      recorderRef.current = recorder;
+      isRecordingRef.current = true;
       setIsRecording(true);
     } catch {
+      recorderRef.current?.cancel();
+      recorderRef.current = null;
+      isRecordingRef.current = false;
       setVoiceError('Allow microphone access to answer by voice, or tap a chip below.');
       setIsRecording(false);
     }
   };
 
-  const stopVoiceAnswer = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
+  const stopVoiceAnswer = async () => {
+    if (!isRecordingRef.current || !recorderRef.current) {
       setIsRecording(false);
+      setMicLevel(0);
+      return;
     }
+
+    isRecordingRef.current = false;
+    setIsRecording(false);
+    setMicLevel(0);
+
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    const result = await recorder.stop();
+
+    if (result.isSilent) {
+      setVoiceError(
+        lang === 'kn-IN'
+          ? 'ಧ್ವನಿ ಕೇಳಿಸಲಿಲ್ಲ. ಮೈಕ್ ಹತ್ತಿರ ಸಂಖ್ಯೆಯನ್ನು ಹೇಳಿ ಅಥವಾ ಕೆಳಗಿನ ಆಯ್ಕೆ ಟ್ಯಾಪ್ ಮಾಡಿ.'
+          : lang === 'hi-IN'
+          ? 'आवाज़ सुनाई नहीं दी। माइक के पास संख्या बोलें या नीचे विकल्प चुनें।'
+          : 'No speech detected. Hold mic close and speak clearly, or tap a chip below.'
+      );
+      return;
+    }
+
+    await submitVoiceAnswer(result.blob);
   };
 
   const submitVoiceAnswer = async (audioBlob: Blob) => {
@@ -461,7 +407,14 @@ export default function MultilingualOnboardingModal({
     setVoiceError(null);
     try {
       const formData = new FormData();
-      formData.append('file', audioBlob, 'onboarding_answer.webm');
+      const ext = audioBlob.type.includes('wav')
+        ? 'wav'
+        : audioBlob.type.includes('mp4')
+        ? 'mp4'
+        : audioBlob.type.includes('ogg')
+        ? 'ogg'
+        : 'webm';
+      formData.append('file', audioBlob, `onboarding_answer.${ext}`);
       formData.append('mode', 'onboarding_step');
       formData.append('step', String(stepIdx + 1));
       formData.append('languageCode', lang);
@@ -484,12 +437,6 @@ export default function MultilingualOnboardingModal({
         }
         if (typeof data.extractedValue === 'number') {
           setCurrentVal(data.extractedValue);
-        } else if (clientTranscriptRef.current) {
-          const clientParsed = parseClientNumber(clientTranscriptRef.current);
-          if (clientParsed !== null) {
-            setCurrentVal(clientParsed);
-            setVoiceTranscript(clientTranscriptRef.current);
-          }
         }
         if (data.confirmationText) {
           setReadBackText(data.confirmationText);
@@ -502,24 +449,6 @@ export default function MultilingualOnboardingModal({
         return;
       }
 
-      // If server returned error, check if client speech recognition captured speech
-      if (clientTranscriptRef.current) {
-        const localVal = parseClientNumber(clientTranscriptRef.current);
-        if (localVal !== null) {
-          setCurrentVal(localVal);
-          setVoiceTranscript(clientTranscriptRef.current);
-          const feedback =
-            lang === 'hi-IN'
-              ? `₹${localVal} दर्ज किया गया।`
-              : lang === 'en-IN'
-              ? `Recorded ₹${localVal}.`
-              : `ರೂ. ${localVal} ದಾಖಲಿಸಲಾಗಿದೆ.`;
-          setReadBackText(feedback);
-          speakBrowserFallback(feedback, lang);
-          return;
-        }
-      }
-
       setVoiceError(
         lang === 'kn-IN'
           ? 'ಧ್ವನಿ ಗುರುತಿಸಲು ಸಾಧ್ಯವಾಗಿಲ್ಲ, ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಬಟನ್ ಆಯ್ಕೆಮಾಡಿ ಅಥವಾ ಟೈಪ್ ಮಾಡಿ.'
@@ -528,14 +457,6 @@ export default function MultilingualOnboardingModal({
           : 'Could not detect amount clearly. Please tap a chip below or type.'
       );
     } catch {
-      if (clientTranscriptRef.current) {
-        const localVal = parseClientNumber(clientTranscriptRef.current);
-        if (localVal !== null) {
-          setCurrentVal(localVal);
-          setVoiceTranscript(clientTranscriptRef.current);
-          return;
-        }
-      }
       setVoiceError(
         lang === 'kn-IN'
           ? 'ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಬಟನ್ ಆಯ್ಕೆಮಾಡಿ ಅಥವಾ ಟೈಪ್ ಮಾಡಿ.'
@@ -724,6 +645,18 @@ export default function MultilingualOnboardingModal({
                   </>
                 )}
               </button>
+
+              {isRecording && (
+                <div className="flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] font-medium text-rose-700">
+                  <span className="h-2 w-2 rounded-full bg-rose-600 animate-pulse" />
+                  <span className="h-1.5 w-12 overflow-hidden rounded-full bg-rose-200">
+                    <span
+                      className="block h-full bg-rose-600 transition-all duration-75"
+                      style={{ width: `${Math.max(12, Math.round(micLevel * 100))}%` }}
+                    />
+                  </span>
+                </div>
+              )}
             </div>
 
             <p className="text-[11px] text-slate-500">{copy.voiceTip}</p>

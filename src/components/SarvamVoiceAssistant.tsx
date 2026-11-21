@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 
 import { readLocalBillProfile, SupportedLanguage } from '@/lib/cashflow-slicer';
+import { BrowserVoiceRecorder } from '@/lib/browser-audio';
 
 interface VoiceAssistantProps {
   userId?: string;
@@ -25,29 +26,52 @@ interface VoiceAssistantProps {
 }
 
 interface ActionData {
-  intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT';
+  intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_BILLS_SHIELD' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT';
   category: 'fuel' | 'food' | 'rent' | 'maintenance' | 'income' | null;
   amount: number | null;
   previousBalance?: number;
   updatedBalance?: number;
+  billShieldBalance?: number;
   vaultBalance?: number;
   transactionId?: string;
 }
 
-const VOICE_BTN_LABELS: Record<SupportedLanguage, { speak: string; readShield: string }> = {
+const VOICE_BTN_LABELS: Record<
+  SupportedLanguage,
+  { speak: string; readShield: string; noSpeech: string; playing: string }
+> = {
   'kn-IN': {
     speak: 'ಮಾತನಾಡಿ · Speak',
     readShield: 'ಬಿಲ್ ಶೀಲ್ಡ್ ಸ್ಥಿತಿ ಕೇಳಿ / Read Shield',
+    noSpeech: 'ಧ್ವನಿ ಕೇಳಿಸಲಿಲ್ಲ. ಮೈಕ್ ಹತ್ತಿರ ಸ್ಪಷ್ಟವಾಗಿ ಮಾತನಾಡಿ.',
+    playing: 'ಕನ್ನಡ ಉತ್ತರ ಕೇಳಿಸುತ್ತಿದೆ...',
   },
   'hi-IN': {
     speak: 'बोलें · Speak',
     readShield: 'बिल शील्ड स्थिति सुनें / Read Shield',
+    noSpeech: 'आवाज़ सुनाई नहीं दी। माइक के पास स्पष्ट बोलें।',
+    playing: 'हिन्दी उत्तर चल रहा है...',
   },
   'en-IN': {
     speak: 'Speak (Voice)',
     readShield: 'Read Bill Shield Status',
+    noSpeech: 'No speech detected. Hold mic close and speak clearly.',
+    playing: 'Playing voice reply...',
   },
 };
+
+function extractLanguageDetail(detail: unknown): SupportedLanguage | null {
+  if (detail === 'kn-IN' || detail === 'hi-IN' || detail === 'en-IN') {
+    return detail;
+  }
+  if (detail && typeof detail === 'object' && 'language' in detail) {
+    const lang = (detail as { language?: unknown }).language;
+    if (lang === 'kn-IN' || lang === 'hi-IN' || lang === 'en-IN') {
+      return lang;
+    }
+  }
+  return null;
+}
 
 export default function SarvamVoiceAssistant({
   userId = 'rider_blr_01',
@@ -57,6 +81,7 @@ export default function SarvamVoiceAssistant({
 
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [micLevel, setMicLevel] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -69,10 +94,21 @@ export default function SarvamVoiceAssistant({
   const [showDrawer, setShowDrawer] = useState(false);
   const [languageCode, setLanguageCode] = useState<SupportedLanguage>('kn-IN');
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const recorderRef = useRef<BrowserVoiceRecorder | null>(null);
+  const isRecordingRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+
+  const stopPlayback = () => {
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    setIsPlayingAudio(false);
+  };
 
   useEffect(() => {
     const saved = readLocalBillProfile(userId);
@@ -81,9 +117,9 @@ export default function SarvamVoiceAssistant({
     }
 
     const handleLangEvent = (ev: Event) => {
-      const detail = (ev as CustomEvent<SupportedLanguage>).detail;
-      if (detail === 'kn-IN' || detail === 'hi-IN' || detail === 'en-IN') {
-        setLanguageCode(detail);
+      const parsedLang = extractLanguageDetail((ev as CustomEvent).detail);
+      if (parsedLang) {
+        setLanguageCode(parsedLang);
       }
     };
     window.addEventListener('steadygig:lang-change', handleLangEvent);
@@ -91,18 +127,14 @@ export default function SarvamVoiceAssistant({
     return () => {
       window.removeEventListener('steadygig:lang-change', handleLangEvent);
       if (timerRef.current) clearInterval(timerRef.current);
-      if (audioPlayerRef.current) {
-        audioPlayerRef.current.pause();
-        audioPlayerRef.current = null;
-      }
+      recorderRef.current?.cancel();
+      stopPlayback();
     };
   }, [userId]);
 
   const playAudioBase64 = (base64String: string) => {
     try {
-      if (audioPlayerRef.current) {
-        audioPlayerRef.current.pause();
-      }
+      stopPlayback();
 
       const audioSrc = base64String.startsWith('data:')
         ? base64String
@@ -123,49 +155,50 @@ export default function SarvamVoiceAssistant({
     }
   };
 
-  const startRecording = async () => {
+  const speakBrowserFallback = (text: string, lang: SupportedLanguage) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window) || !text) {
+      return;
+    }
     try {
+      stopPlayback();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = lang;
+      utter.rate = 0.98;
+      setIsPlayingAudio(true);
+      utter.onend = () => setIsPlayingAudio(false);
+      utter.onerror = () => setIsPlayingAudio(false);
+      window.speechSynthesis.speak(utter);
+    } catch {
+      setIsPlayingAudio(false);
+    }
+  };
+
+  const startRecording = async () => {
+    if (isRecordingRef.current || isProcessing) return;
+
+    try {
+      stopPlayback();
       setErrorMessage(null);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setMicLevel(0);
 
-      const mimeTypes = [
-        'audio/webm;codecs=opus',
-        'audio/webm',
-        'audio/mp4',
-        'audio/wav',
-      ];
-      const mimeType =
-        mimeTypes.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+      const recorder = new BrowserVoiceRecorder({
+        onLevel: (level) => setMicLevel(level),
+      });
+      await recorder.start();
 
-      const recorder = new MediaRecorder(
-        stream,
-        mimeType ? { mimeType } : undefined
-      );
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, {
-          type: mimeType || 'audio/webm',
-        });
-        stream.getTracks().forEach((track) => track.stop());
-        await sendAudioToPipeline(audioBlob);
-      };
-
-      recorder.start(250);
+      recorderRef.current = recorder;
+      isRecordingRef.current = true;
       setIsRecording(true);
       setRecordingSeconds(0);
 
+      if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = setInterval(() => {
         setRecordingSeconds((prev) => prev + 1);
       }, 1000);
     } catch {
+      recorderRef.current?.cancel();
+      recorderRef.current = null;
+      isRecordingRef.current = false;
       setErrorMessage(
         'ಮೈಕ್ರೊಫೋನ್ ಅನುಮತಿ ನೀಡಿ · Allow microphone access to speak.'
       );
@@ -173,16 +206,32 @@ export default function SarvamVoiceAssistant({
     }
   };
 
-  const stopRecording = () => {
+  const stopRecording = async () => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
 
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
+    if (!isRecordingRef.current || !recorderRef.current) {
       setIsRecording(false);
+      setMicLevel(0);
+      return;
     }
+
+    isRecordingRef.current = false;
+    setIsRecording(false);
+    setMicLevel(0);
+
+    const recorder = recorderRef.current;
+    recorderRef.current = null;
+    const result = await recorder.stop();
+
+    if (result.isSilent) {
+      setErrorMessage(VOICE_BTN_LABELS[languageCode].noSpeech);
+      return;
+    }
+
+    await sendAudioToPipeline(result.blob);
   };
 
   const sendAudioToPipeline = async (audioBlob: Blob) => {
@@ -191,7 +240,14 @@ export default function SarvamVoiceAssistant({
 
     try {
       const formData = new FormData();
-      formData.append('file', audioBlob, 'rider_voice.webm');
+      const ext = audioBlob.type.includes('wav')
+        ? 'wav'
+        : audioBlob.type.includes('mp4')
+        ? 'mp4'
+        : audioBlob.type.includes('ogg')
+        ? 'ogg'
+        : 'webm';
+      formData.append('file', audioBlob, `rider_voice.${ext}`);
       formData.append('userId', userId);
       formData.append('languageCode', languageCode);
 
@@ -217,6 +273,8 @@ export default function SarvamVoiceAssistant({
 
       if (data.audioBase64) {
         playAudioBase64(data.audioBase64);
+      } else if (data.replyText) {
+        speakBrowserFallback(data.replyText, languageCode);
       }
 
       if (data.action) {
@@ -341,33 +399,37 @@ export default function SarvamVoiceAssistant({
             </div>
           </div>
 
-          {actionData?.intent === 'LOG_EXPENSE' && actionData.amount && (
-            <div className="mt-2.5 flex items-center justify-between border-t border-slate-100 pt-2.5 text-xs">
-              <div className="flex items-center gap-1.5 text-slate-600">
-                {actionData.category === 'food' ? (
-                  <Utensils className="h-3.5 w-3.5 text-slate-500" />
-                ) : actionData.category === 'rent' ? (
-                  <Home className="h-3.5 w-3.5 text-slate-500" />
-                ) : (
-                  <Fuel className="h-3.5 w-3.5 text-slate-500" />
-                )}
-                <span className="capitalize">{actionData.category || 'Expense'}</span>
-                <span className="font-mono font-semibold text-slate-900 tabular-nums">
-                  ₹{actionData.amount}
-                </span>
-              </div>
+          {(actionData?.intent === 'LOG_EXPENSE' || actionData?.intent === 'LOG_INCOME') &&
+            actionData.amount && (
+              <div className="mt-2.5 flex items-center justify-between border-t border-slate-100 pt-2.5 text-xs">
+                <div className="flex items-center gap-1.5 text-slate-600">
+                  {actionData.category === 'food' ? (
+                    <Utensils className="h-3.5 w-3.5 text-slate-500" />
+                  ) : actionData.category === 'rent' ? (
+                    <Home className="h-3.5 w-3.5 text-slate-500" />
+                  ) : (
+                    <Fuel className="h-3.5 w-3.5 text-slate-500" />
+                  )}
+                  <span className="capitalize">
+                    {actionData.category ||
+                      (actionData.intent === 'LOG_INCOME' ? 'Earnings' : 'Expense')}
+                  </span>
+                  <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                    {actionData.intent === 'LOG_INCOME' ? '+' : ''}₹{actionData.amount}
+                  </span>
+                </div>
 
-              {typeof actionData.updatedBalance === 'number' && (
-                <span className="font-mono font-medium text-emerald-700 tabular-nums">
-                  Balance ₹{actionData.updatedBalance.toLocaleString('en-IN')}
-                </span>
-              )}
-            </div>
-          )}
+                {typeof actionData.updatedBalance === 'number' && (
+                  <span className="font-mono font-medium text-emerald-700 tabular-nums">
+                    Balance ₹{actionData.updatedBalance.toLocaleString('en-IN')}
+                  </span>
+                )}
+              </div>
+            )}
 
           <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-400">
             <span>
-              {isPlayingAudio ? 'Playing Kannada reply...' : 'Sarvam AI + Gemini'}
+              {isPlayingAudio ? VOICE_BTN_LABELS[languageCode].playing : 'Sarvam AI + Gemini'}
             </span>
             {audioBase64 && (
               <button
@@ -416,7 +478,14 @@ export default function SarvamVoiceAssistant({
                 <button
                   key={item.code}
                   type="button"
-                  onClick={() => setLanguageCode(item.code)}
+                  onClick={() => {
+                    setLanguageCode(item.code);
+                    window.dispatchEvent(
+                      new CustomEvent('steadygig:lang-change', {
+                        detail: { language: item.code },
+                      })
+                    );
+                  }}
                   className={`rounded-lg px-2 py-1 text-[11px] font-semibold transition-colors ${
                     languageCode === item.code
                       ? 'bg-[#047857] text-white'
@@ -460,6 +529,12 @@ export default function SarvamVoiceAssistant({
         {isRecording && (
           <div className="flex items-center gap-2 rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs font-medium text-rose-700 shadow-sm">
             <span className="h-2 w-2 rounded-full bg-rose-600 animate-pulse" />
+            <span className="h-1.5 w-10 overflow-hidden rounded-full bg-rose-100">
+              <span
+                className="block h-full bg-rose-600 transition-all duration-75"
+                style={{ width: `${Math.max(12, Math.round(micLevel * 100))}%` }}
+              />
+            </span>
             <span className="font-mono tabular-nums">
               {formatTime(recordingSeconds)}
             </span>

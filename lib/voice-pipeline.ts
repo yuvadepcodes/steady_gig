@@ -68,6 +68,17 @@ export function normalizeLanguageCode(raw?: string | null): SupportedVoiceLangua
   return 'kn-IN';
 }
 
+function formatSupabaseError(err: unknown): string {
+  if (!err || typeof err !== 'object') return String(err);
+  const e = err as Record<string, unknown>;
+  return JSON.stringify({
+    code: e.code ?? null,
+    message: e.message ?? String(err),
+    details: e.details ?? null,
+    hint: e.hint ?? null,
+  });
+}
+
 /**
  * Fetch current rider's financial context from Supabase or fallback
  */
@@ -91,7 +102,14 @@ export async function getRiderFinancialContext(
       .eq('id', userId)
       .maybeSingle();
 
-    if (error || !data) {
+    if (error) {
+      console.warn(
+        `[SteadyGig Voice] Supabase rider lookup failed: ${formatSupabaseError(error)}`
+      );
+      return fallback;
+    }
+
+    if (!data) {
       return fallback;
     }
 
@@ -127,12 +145,25 @@ export async function runSarvamSTT(
   sarvamApiKey: string,
   languageCode?: SupportedVoiceLanguage
 ): Promise<string> {
+  const rawMime = (audioBlob.type || 'audio/webm').toLowerCase();
+  const cleanMime = rawMime.split(';')[0].trim() || 'audio/webm';
+  const ext = cleanMime.includes('mp4')
+    ? 'mp4'
+    : cleanMime.includes('wav')
+    ? 'wav'
+    : cleanMime.includes('ogg')
+    ? 'ogg'
+    : cleanMime.includes('mpeg') || cleanMime.includes('mp3')
+    ? 'mp3'
+    : 'webm';
+  const arrayBuf = await audioBlob.arrayBuffer();
+
   // 1. First priority: Sarvam AI STT if API key is provided
   if (sarvamApiKey && sarvamApiKey.trim().length > 0) {
     try {
       const formData = new FormData();
-      const filename = (audioBlob as File).name || 'audio.webm';
-      formData.append('file', audioBlob, filename);
+      const cleanBlob = new Blob([arrayBuf], { type: cleanMime });
+      formData.append('file', cleanBlob, `rider_voice.${ext}`);
       formData.append('model', 'saaras:v4');
       formData.append('mode', 'codemix');
       formData.append('language_code', languageCode || 'unknown');
@@ -164,10 +195,11 @@ export async function runSarvamSTT(
   const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
   if (geminiApiKey) {
     try {
-      const arrayBuf = await audioBlob.arrayBuffer();
       const base64Audio = Buffer.from(arrayBuf).toString('base64');
-      const mimeType = audioBlob.type || 'audio/webm';
-      const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+      const ai = new GoogleGenAI({
+        apiKey: geminiApiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
 
       const langContext =
         languageCode === 'hi-IN'
@@ -177,7 +209,7 @@ export async function runSarvamSTT(
           : 'Kannada (or Kanglish)';
 
       const res = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-transcribe',
         contents: [
           {
             role: 'user',
@@ -192,7 +224,7 @@ Strict instructions:
               },
               {
                 inlineData: {
-                  mimeType: mimeType.startsWith('audio/') ? mimeType : 'audio/webm',
+                  mimeType: cleanMime.startsWith('audio/') ? cleanMime : 'audio/webm',
                   data: base64Audio,
                 },
               },
@@ -322,7 +354,10 @@ export async function executeOnboardingStepVoice(params: {
 
   if (geminiApiKey && transcript.trim().length > 0) {
     try {
-      const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+      const ai = new GoogleGenAI({
+        apiKey: geminiApiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
       const stepDesc =
         params.step === 1
           ? 'Monthly fixed bills (Rent + Bike/Phone EMI in INR)'
@@ -338,7 +373,7 @@ Spoken transcript: "${transcript}"
 Return JSON only: { "extractedValue": number | null }`;
 
       const res = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-4-hydrogen',
         contents: prompt,
         config: { responseMimeType: 'application/json' },
       });
@@ -452,7 +487,10 @@ export async function extractIntentAndReply(
 
   if (geminiApiKey) {
     try {
-      const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+      const ai = new GoogleGenAI({
+        apiKey: geminiApiKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
 
       const prompt = `User Spoken Transcript:
 "${transcript}"
@@ -485,7 +523,7 @@ Required JSON Schema:
 }`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-4-hydrogen',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -663,22 +701,50 @@ export async function mutateRiderTransaction(
     const txCategory =
       category || (isIncome ? 'income' : 'fuel');
     const txType = isIncome ? 'income' : 'expense';
+    const txPayload = {
+      rider_id: rider.id,
+      category: txCategory,
+      amount,
+      type: txType,
+      description: `Voice logged: ${txCategory} (₹${amount})`,
+      created_at: new Date().toISOString(),
+    };
 
-    const { data: tx, error: txError } = await supabase
+    let { data: tx, error: txError } = await supabase
       .from('transactions')
-      .insert({
-        rider_id: rider.id,
-        category: txCategory,
-        amount,
-        type: txType,
-        description: `Voice logged: ${txCategory} (₹${amount})`,
-        created_at: new Date().toISOString(),
-      })
+      .insert(txPayload)
       .select('id')
       .maybeSingle();
 
+    // If rider row hasn't been seeded yet (FK violation 23503), create it and retry once
+    if (txError?.code === '23503') {
+      const { error: seedError } = await supabase.from('riders').upsert({
+        id: rider.id,
+        name: rider.name || 'Ravi Kumar',
+        balance: rider.balance,
+        vault_balance: rider.vault_balance,
+        daily_earnings: rider.daily_earnings,
+        target_payout: rider.target_payout,
+        safety_reserve: rider.safety_reserve ?? 2000,
+        monthly_fixed_bills: rider.monthly_fixed_bills ?? 12000,
+        bill_due_day: rider.bill_due_day ?? 5,
+        daily_fuel_spend: rider.daily_fuel_spend ?? 250,
+      });
+      if (!seedError) {
+        const retry = await supabase
+          .from('transactions')
+          .insert(txPayload)
+          .select('id')
+          .maybeSingle();
+        tx = retry.data;
+        txError = retry.error;
+      }
+    }
+
     if (txError) {
-      console.warn('[SteadyGig Voice] Supabase transaction insert failed:', txError);
+      console.warn(
+        `[SteadyGig Voice] Supabase transaction insert failed: ${formatSupabaseError(txError)}`
+      );
     }
 
     const { error: riderError } = await supabase
@@ -690,7 +756,9 @@ export async function mutateRiderTransaction(
       .eq('id', rider.id);
 
     if (riderError) {
-      console.warn('[SteadyGig Voice] Supabase rider balance update failed:', riderError);
+      console.warn(
+        `[SteadyGig Voice] Supabase rider balance update failed: ${formatSupabaseError(riderError)}`
+      );
     }
 
     return {
@@ -698,7 +766,9 @@ export async function mutateRiderTransaction(
       transactionId: tx?.id,
     };
   } catch (err) {
-    console.warn('[SteadyGig Voice] Supabase mutation error:', err);
+    console.warn(
+      `[SteadyGig Voice] Supabase mutation error: ${formatSupabaseError(err)}`
+    );
     return { updatedBalance };
   }
 }

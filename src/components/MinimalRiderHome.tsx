@@ -302,10 +302,39 @@ export default function MinimalRiderHome() {
   useEffect(() => {
     loadFromSupabase();
 
-    const handleRefresh = () => {
+    const handleRefresh = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ updatedBalance?: number } | undefined>)
+        ?.detail;
+      if (detail && typeof detail.updatedBalance === 'number') {
+        const nextBal = detail.updatedBalance;
+        setProfile((prev) => {
+          const updated = { ...prev, currentBalance: nextBal };
+          persistRiderBillProfile(updated).catch(() => {});
+          return updated;
+        });
+        return;
+      }
       loadFromSupabase();
     };
+    const handleLangSync = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ language?: SupportedLanguage } | SupportedLanguage>)
+        ?.detail;
+      const nextLang =
+        typeof detail === 'string'
+          ? detail
+          : detail && typeof detail === 'object'
+          ? detail.language
+          : undefined;
+      if (nextLang === 'kn-IN' || nextLang === 'hi-IN' || nextLang === 'en-IN') {
+        setProfile((prev) =>
+          prev.preferredLanguage === nextLang
+            ? prev
+            : { ...prev, preferredLanguage: nextLang }
+        );
+      }
+    };
     window.addEventListener('steadygig:refresh', handleRefresh);
+    window.addEventListener('steadygig:lang-change', handleLangSync);
 
     const client = supabase;
     const channel = client
@@ -314,23 +343,24 @@ export default function MinimalRiderHome() {
           .on(
             'postgres_changes',
             { event: '*', schema: 'public', table: 'riders' },
-            handleRefresh
+            () => loadFromSupabase()
           )
           .on(
             'postgres_changes',
             { event: '*', schema: 'public', table: 'transactions' },
-            handleRefresh
+            () => loadFromSupabase()
           )
           .on(
             'postgres_changes',
             { event: '*', schema: 'public', table: 'payout_logs' },
-            handleRefresh
+            () => loadFromSupabase()
           )
           .subscribe()
       : null;
 
     return () => {
       window.removeEventListener('steadygig:refresh', handleRefresh);
+      window.removeEventListener('steadygig:lang-change', handleLangSync);
       if (client && channel) {
         client.removeChannel(channel);
       }

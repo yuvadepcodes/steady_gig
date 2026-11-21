@@ -199,6 +199,7 @@ export function writeLocalBillProfile(profile: RiderBillProfile): void {
     window.localStorage.setItem(
       getStorageKey(profile.riderId),
       JSON.stringify({
+        currentBalance: profile.currentBalance,
         monthlyFixedBills: profile.monthlyFixedBills,
         billDueDay: profile.billDueDay,
         dailyFuelSpend: profile.dailyFuelSpend,

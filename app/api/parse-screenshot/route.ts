@@ -102,7 +102,10 @@ export async function POST(req: NextRequest) {
     const arrayBuffer = await file.arrayBuffer();
     base64Image = Buffer.from(arrayBuffer).toString('base64');
 
-    const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+    const ai = new GoogleGenAI({
+      apiKey: geminiApiKey,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    });
     const prompt = `You are a gig-delivery earnings extractor for Bengaluru riders (Swiggy, Zomato, Domino's, Zepto, Blinkit, Porter).
 Analyze this weekly or daily delivery partner earnings screenshot strictly for earnings metrics.
 
@@ -136,26 +139,40 @@ Extract ONLY these numeric & schedule fields in JSON:
 
 If daily breakdown bars are shown, extract exact numbers for Monday–Sunday so they sum close to totalEarnings. If only a single day or partial days are visible, populate visible days and 0 for invisible days.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: prompt },
-            {
-              inlineData: {
-                mimeType: mimeType === 'image/jpg' ? 'image/jpeg' : mimeType,
-                data: base64Image,
-              },
+    const contents = [
+      {
+        role: 'user',
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: mimeType === 'image/jpg' ? 'image/jpeg' : mimeType,
+              data: base64Image,
             },
-          ],
-        },
-      ],
-      config: {
-        responseMimeType: 'application/json',
+          },
+        ],
       },
-    });
+    ];
+
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents,
+        config: { responseMimeType: 'application/json' },
+      });
+    } catch (primaryErr) {
+      const msg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr ?? '');
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
+        response = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-lite',
+          contents,
+          config: { responseMimeType: 'application/json' },
+        });
+      } else {
+        throw primaryErr;
+      }
+    }
 
     // Clear base64 payload from memory immediately after inference
     base64Image = '';
