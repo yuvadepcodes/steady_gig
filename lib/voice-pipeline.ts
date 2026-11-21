@@ -23,11 +23,21 @@ export interface VoiceIntentResult {
   replyText: string;
 }
 
+export interface SarvamDiagnostics {
+  sarvamKeyConfigured: boolean;
+  geminiKeyConfigured: boolean;
+  sttProvider: 'sarvam' | 'gemini' | 'none';
+  ttsProvider: 'sarvam' | 'none';
+  sttError?: string;
+  ttsError?: string;
+}
+
 export interface VoicePipelineResponse {
   transcript: string;
   replyText: string;
   audioBase64: string | null;
   languageCode: SupportedVoiceLanguage;
+  diagnostics?: SarvamDiagnostics;
   action: {
     intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_BILLS_SHIELD' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT';
     category: 'fuel' | 'food' | 'rent' | 'maintenance' | 'income' | null;
@@ -46,6 +56,7 @@ export interface OnboardingVoiceResult {
   confirmationText: string;
   audioBase64: string | null;
   languageCode: SupportedVoiceLanguage;
+  diagnostics?: SarvamDiagnostics;
 }
 
 const DEFAULT_RIDER: RiderFinancialContext = {
@@ -177,15 +188,38 @@ function safeParseJsonObject(rawText: string): Record<string, unknown> | null {
   }
 }
 
-/**
- * Step A: Send audio to Sarvam AI Speech-To-Text (saaras:v4)
- * with Automatic Multimodal Gemini Audio Fallback
- */
-export async function runSarvamSTT(
+function cleanEnvSecret(value?: string): string {
+  if (!value) return '';
+  let cleaned = value.trim().replace(/^['"]|['"]$/g, '').trim();
+  if (/^bearer\s+/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^bearer\s+/i, '').trim();
+  }
+  return cleaned;
+}
+
+export function getSarvamApiKey(): string {
+  return cleanEnvSecret(
+    process.env.SARVAM_API_KEY ||
+      process.env.SARVAM_SUBSCRIPTION_KEY ||
+      process.env.SARVAM_KEY
+  );
+}
+
+export function getGeminiApiKey(): string {
+  return cleanEnvSecret(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
+}
+
+interface InternalSTTResult {
+  transcript: string;
+  provider: 'sarvam' | 'gemini' | 'none';
+  sarvamError?: string;
+}
+
+async function runSarvamSTTInternal(
   audioInput: AudioInput,
   sarvamApiKey: string,
   languageCode?: SupportedVoiceLanguage
-): Promise<string> {
+): Promise<InternalSTTResult> {
   let bytes: Uint8Array;
   let rawMime: string;
 
@@ -207,9 +241,11 @@ export async function runSarvamSTT(
 
   const cleanMime = normalizeAudioMimeType(rawMime);
   const filename = getAudioFilenameForMime(cleanMime);
+  const cleanKey = cleanEnvSecret(sarvamApiKey);
+  let sarvamError: string | undefined;
 
   // 1. First priority: Sarvam AI STT if API key is provided
-  if (sarvamApiKey && sarvamApiKey.trim().length > 0) {
+  if (cleanKey.length > 0) {
     try {
       const formData = new FormData();
       const cleanBlob = new Blob([new Uint8Array(bytes)], { type: cleanMime });
@@ -221,7 +257,7 @@ export async function runSarvamSTT(
       const response = await fetch('https://api.sarvam.ai/speech-to-text', {
         method: 'POST',
         headers: {
-          'api-subscription-key': sarvamApiKey.trim(),
+          'api-subscription-key': cleanKey,
         },
         body: formData,
       });
@@ -230,24 +266,30 @@ export async function runSarvamSTT(
         const result = await response.json();
         if (result?.transcript && typeof result.transcript === 'string') {
           const text = result.transcript.trim();
-          if (text.length > 0) return text;
+          if (text.length > 0) {
+            return { transcript: text, provider: 'sarvam' };
+          }
         }
+        sarvamError = 'Sarvam STT returned empty transcript.';
       } else {
         const errorText = await response.text().catch(() => '');
-        console.warn(
-          `[SteadyGig] Sarvam STT returned ${response.status}: ${errorText}. Activating Gemini audio fallback.`
-        );
+        sarvamError = `Sarvam STT HTTP ${response.status}${errorText ? `: ${errorText.slice(0, 200)}` : ''}`;
+        console.warn(`[SteadyGig] ${sarvamError}. Activating Gemini audio fallback.`);
       }
     } catch (sarvamErr) {
+      sarvamError =
+        sarvamErr instanceof Error ? sarvamErr.message : String(sarvamErr);
       console.warn(
         '[SteadyGig] Sarvam STT request error, activating Gemini audio fallback:',
         sarvamErr
       );
     }
+  } else {
+    sarvamError = 'SARVAM_API_KEY is not configured in environment variables.';
   }
 
   // 2. Second priority: Gemini Multimodal Audio Transcription
-  const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  const geminiApiKey = getGeminiApiKey();
   if (geminiApiKey) {
     try {
       const base64Audio = Buffer.from(bytes).toString('base64');
@@ -290,58 +332,124 @@ Strict instructions:
 
       const transcript = res.text?.trim() || '';
       if (transcript.length > 0) {
-        return transcript;
+        return { transcript, provider: 'gemini', sarvamError };
       }
     } catch (geminiErr) {
       console.warn('[SteadyGig] Gemini multimodal audio transcription error:', geminiErr);
     }
   }
 
-  return '';
+  return { transcript: '', provider: 'none', sarvamError };
 }
 
 /**
- * Sarvam AI Text-to-Speech (bulbul:v4-flash) for Kannada, Hindi, and English
+ * Step A: Send audio to Sarvam AI Speech-To-Text (saaras:v4)
+ * with Automatic Multimodal Gemini Audio Fallback
+ */
+export async function runSarvamSTT(
+  audioInput: AudioInput,
+  sarvamApiKey: string,
+  languageCode?: SupportedVoiceLanguage
+): Promise<string> {
+  const res = await runSarvamSTTInternal(audioInput, sarvamApiKey, languageCode);
+  return res.transcript;
+}
+
+interface InternalTTSResult {
+  audioBase64: string | null;
+  error?: string;
+}
+
+async function runSarvamTTSInternal(
+  text: string,
+  sarvamApiKey: string,
+  languageCode: SupportedVoiceLanguage = 'kn-IN'
+): Promise<InternalTTSResult> {
+  const cleanKey = cleanEnvSecret(sarvamApiKey);
+  if (!cleanKey) {
+    return {
+      audioBase64: null,
+      error: 'SARVAM_API_KEY is not configured in environment variables.',
+    };
+  }
+  if (!text || !text.trim()) {
+    return { audioBase64: null, error: 'Empty TTS text.' };
+  }
+
+  const trimmedText = text.trim().slice(0, 2400);
+  const attempts: Record<string, unknown>[] = [
+    {
+      text: trimmedText,
+      target_language_code: languageCode,
+      model: 'bulbul:v4-flash',
+      speaker: 'shubh_enhi_ads',
+    },
+    {
+      inputs: [trimmedText],
+      target_language_code: languageCode,
+      model: 'bulbul:v4-flash',
+    },
+    {
+      inputs: [trimmedText],
+      target_language_code: languageCode,
+      model: 'bulbul:v3',
+      speaker: 'shubh',
+    },
+  ];
+
+  let lastError = '';
+
+  for (const payload of attempts) {
+    try {
+      const response = await fetch('https://api.sarvam.ai/text-to-speech', {
+        method: 'POST',
+        headers: {
+          'api-subscription-key': cleanKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as {
+          audios?: unknown;
+          audio?: unknown;
+        };
+        if (Array.isArray(data.audios) && typeof data.audios[0] === 'string') {
+          return { audioBase64: data.audios[0] };
+        }
+        if (typeof data.audio === 'string' && data.audio.length > 0) {
+          return { audioBase64: data.audio };
+        }
+        lastError = 'Sarvam TTS returned 200 without audio payload.';
+      } else {
+        const errText = await response.text().catch(() => '');
+        lastError = `Sarvam TTS HTTP ${response.status}${errText ? `: ${errText.slice(0, 200)}` : ''}`;
+        console.warn(`[SteadyGig Voice] ${lastError}`);
+        // Auth/quota errors won't succeed on alternate payloads
+        if (response.status === 401 || response.status === 403 || response.status === 429) {
+          break;
+        }
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      console.warn('[SteadyGig Voice] Sarvam TTS request failed:', err);
+    }
+  }
+
+  return { audioBase64: null, error: lastError || 'Sarvam TTS failed.' };
+}
+
+/**
+ * Sarvam AI Text-to-Speech (bulbul:v4-flash with bulbul:v3 fallback)
  */
 export async function runSarvamTTS(
   text: string,
   sarvamApiKey: string,
   languageCode: SupportedVoiceLanguage = 'kn-IN'
 ): Promise<string | null> {
-  if (!sarvamApiKey || !text) {
-    return null;
-  }
-
-  try {
-    const response = await fetch('https://api.sarvam.ai/text-to-speech', {
-      method: 'POST',
-      headers: {
-        'api-subscription-key': sarvamApiKey.trim(),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        text,
-        target_language_code: languageCode,
-        model: 'bulbul:v4-flash',
-        speaker: 'shubh_enhi_ads',
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      console.warn(`[SteadyGig Voice] Sarvam TTS error [${response.status}]: ${errText}`);
-      return null;
-    }
-
-    const data = await response.json();
-    if (Array.isArray(data.audios) && data.audios.length > 0) {
-      return data.audios[0];
-    }
-  } catch (err) {
-    console.warn('[SteadyGig Voice] Sarvam TTS request failed:', err);
-  }
-
-  return null;
+  const res = await runSarvamTTSInternal(text, sarvamApiKey, languageCode);
+  return res.audioBase64;
 }
 
 /**
@@ -396,14 +504,15 @@ export async function executeOnboardingStepVoice(params: {
   step: 1 | 2 | 3 | 4;
   languageCode: SupportedVoiceLanguage;
 }): Promise<OnboardingVoiceResult> {
-  const sarvamApiKey = process.env.SARVAM_API_KEY || '';
-  const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  const sarvamApiKey = getSarvamApiKey();
+  const geminiApiKey = getGeminiApiKey();
 
-  const transcript = await runSarvamSTT(
+  const sttResult = await runSarvamSTTInternal(
     params.audioBlob,
     sarvamApiKey,
     params.languageCode
   );
+  const transcript = sttResult.transcript;
 
   let extractedValue = parseSpokenNumericValue(transcript);
 
@@ -487,16 +596,24 @@ Return JSON only: { "extractedValue": number | null }`;
         : 'ಧ್ವನಿ ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸಲಿಲ್ಲ, ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಬಟನ್ ಒತ್ತಿ ಅಥವಾ ಟೈಪ್ ಮಾಡಿ.';
   }
 
-  const audioBase64 = confirmationText
-    ? await runSarvamTTS(confirmationText, sarvamApiKey, params.languageCode)
-    : null;
+  const ttsResult = confirmationText
+    ? await runSarvamTTSInternal(confirmationText, sarvamApiKey, params.languageCode)
+    : { audioBase64: null };
 
   return {
     transcript: transcript || '(No speech detected)',
     extractedValue,
     confirmationText,
-    audioBase64,
+    audioBase64: ttsResult.audioBase64,
     languageCode: params.languageCode,
+    diagnostics: {
+      sarvamKeyConfigured: Boolean(sarvamApiKey),
+      geminiKeyConfigured: Boolean(geminiApiKey),
+      sttProvider: sttResult.provider,
+      ttsProvider: ttsResult.audioBase64 ? 'sarvam' : 'none',
+      ...(sttResult.sarvamError ? { sttError: sttResult.sarvamError } : {}),
+      ...(ttsResult.error ? { ttsError: ttsResult.error } : {}),
+    },
   };
 }
 
@@ -859,7 +976,8 @@ export async function readBillShieldStatusAloud(
   userId: string,
   languageCode: SupportedVoiceLanguage = 'kn-IN'
 ): Promise<VoicePipelineResponse> {
-  const sarvamApiKey = process.env.SARVAM_API_KEY || '';
+  const sarvamApiKey = getSarvamApiKey();
+  const geminiApiKey = getGeminiApiKey();
   const rider = await getRiderFinancialContext(userId);
 
   const fuelDaily = rider.daily_fuel_spend || 250;
@@ -876,7 +994,7 @@ export async function readBillShieldStatusAloud(
       ? `Out of ₹${rider.balance}, ₹${fuelProtected} is protected for bike fuel and ₹${billProtected} is shielded for your upcoming rent and EMI bills. You have ₹${spendable} in spendable cash.`
       : `ನಿಮ್ಮ ರೂ. ${rider.balance} ರಲ್ಲಿ ರೂ. ${fuelProtected} ಬೈಕ್ ಪೆಟ್ರೋಲ್‌ಗಾಗಿ ಮತ್ತು ರೂ. ${billProtected} ತಿಂಗಳ ಬಾಡಿಗೆ ಮತ್ತು ಇಎಂಐ ಬಿಲ್ ಶೀಲ್ಡ್‌ನಲ್ಲಿ ಸುರಕ್ಷಿತವಾಗಿದೆ. ಖರ್ಚಿಗೆ ರೂ. ${spendable} ಲಭ್ಯವಿದೆ.`;
 
-  const audioBase64 = await runSarvamTTS(replyText, sarvamApiKey, languageCode);
+  const ttsResult = await runSarvamTTSInternal(replyText, sarvamApiKey, languageCode);
 
   return {
     transcript:
@@ -886,8 +1004,15 @@ export async function readBillShieldStatusAloud(
         ? 'Bill Shield & Fuel Reserve Status'
         : 'ಬಿಲ್ ಶೀಲ್ಡ್ ಮತ್ತು ಪೆಟ್ರೋಲ್ ರಕ್ಷಣೆ ಸ್ಥಿತಿ',
     replyText,
-    audioBase64,
+    audioBase64: ttsResult.audioBase64,
     languageCode,
+    diagnostics: {
+      sarvamKeyConfigured: Boolean(sarvamApiKey),
+      geminiKeyConfigured: Boolean(geminiApiKey),
+      sttProvider: 'none',
+      ttsProvider: ttsResult.audioBase64 ? 'sarvam' : 'none',
+      ...(ttsResult.error ? { ttsError: ttsResult.error } : {}),
+    },
     action: {
       intent: 'CHECK_BILLS_SHIELD',
       category: null,
@@ -911,11 +1036,12 @@ export async function executeVoicePipeline(
   userId: string,
   languageCode: SupportedVoiceLanguage = 'kn-IN'
 ): Promise<VoicePipelineResponse> {
-  const sarvamApiKey = process.env.SARVAM_API_KEY || '';
-  const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  const sarvamApiKey = getSarvamApiKey();
+  const geminiApiKey = getGeminiApiKey();
 
   const riderContext = await getRiderFinancialContext(userId);
-  const transcript = await runSarvamSTT(audioInput, sarvamApiKey, languageCode);
+  const sttResult = await runSarvamSTTInternal(audioInput, sarvamApiKey, languageCode);
+  const transcript = sttResult.transcript;
 
   let extraction: VoiceIntentResult;
   try {
@@ -964,13 +1090,16 @@ export async function executeVoicePipeline(
     }
   }
 
-  const audioBase64 = await runSarvamTTS(
+  const ttsResult = await runSarvamTTSInternal(
     extraction.replyText,
     sarvamApiKey,
     languageCode
   ).catch((ttsErr) => {
     console.warn('[SteadyGig Voice] TTS fallback:', ttsErr);
-    return null;
+    return {
+      audioBase64: null,
+      error: ttsErr instanceof Error ? ttsErr.message : String(ttsErr),
+    };
   });
 
   const fuelDaily = riderContext.daily_fuel_spend || 250;
@@ -982,8 +1111,16 @@ export async function executeVoicePipeline(
   return {
     transcript: transcript || '(No speech detected)',
     replyText: extraction.replyText,
-    audioBase64,
+    audioBase64: ttsResult.audioBase64,
     languageCode,
+    diagnostics: {
+      sarvamKeyConfigured: Boolean(sarvamApiKey),
+      geminiKeyConfigured: Boolean(geminiApiKey),
+      sttProvider: sttResult.provider,
+      ttsProvider: ttsResult.audioBase64 ? 'sarvam' : 'none',
+      ...(sttResult.sarvamError ? { sttError: sttResult.sarvamError } : {}),
+      ...(ttsResult.error ? { ttsError: ttsResult.error } : {}),
+    },
     action: {
       intent: extraction.intent,
       category: extraction.category,

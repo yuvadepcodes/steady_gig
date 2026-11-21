@@ -1,11 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { runSarvamTTS, SupportedVoiceLanguage } from '@/lib/voice-pipeline';
+import {
+  getSarvamApiKey,
+  runSarvamTTS,
+  SupportedVoiceLanguage,
+} from '@/lib/voice-pipeline';
+
+export const runtime = 'nodejs';
+export const maxDuration = 30;
 
 const ALLOWED_LANGUAGES = new Set<SupportedVoiceLanguage>([
   'kn-IN',
   'hi-IN',
   'en-IN',
 ]);
+
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    sarvamKeyConfigured: Boolean(getSarvamApiKey()),
+  });
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -34,12 +48,13 @@ export async function POST(req: NextRequest) {
       ? (rawLang as SupportedVoiceLanguage)
       : 'kn-IN';
 
-    const sarvamApiKey = process.env.SARVAM_API_KEY || '';
+    const sarvamApiKey = getSarvamApiKey();
     const audioBase64 = await runSarvamTTS(rawText, sarvamApiKey, languageCode);
 
     return NextResponse.json({
       audioBase64,
       languageCode,
+      sarvamKeyConfigured: Boolean(sarvamApiKey),
       provider: audioBase64 ? 'sarvam' : 'browser-fallback',
     });
   } catch (err) {

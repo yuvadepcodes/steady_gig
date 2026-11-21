@@ -10,6 +10,9 @@ function normalizeSupabaseUrl(value?: string): string | undefined {
   if (!cleaned) return undefined;
   try {
     const parsed = new URL(cleaned);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return undefined;
+    }
     // Supabase JS SDK appends /rest/v1, /auth/v1, /realtime/v1 automatically;
     // strip accidental paths like /rest/v1 from the base URL.
     if (parsed.pathname && parsed.pathname !== '/') {
@@ -17,7 +20,21 @@ function normalizeSupabaseUrl(value?: string): string | undefined {
     }
     return cleaned.replace(/\/+$/, '');
   } catch {
-    return cleaned;
+    return undefined;
+  }
+}
+
+function safeCreateSupabaseClient(
+  url?: string,
+  key?: string,
+  options?: Parameters<typeof createClient>[2]
+): SupabaseClient | null {
+  if (!url || !key) return null;
+  try {
+    return createClient(url, key, options);
+  } catch (err) {
+    console.warn('[SteadyGig] Supabase client init skipped:', err);
+    return null;
   }
 }
 
@@ -30,13 +47,15 @@ const supabaseKey = cleanEnv(
 
 if (!supabaseUrl || !supabaseKey) {
   console.warn(
-    '[SteadyGig] Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.'
+    '[SteadyGig] Missing or invalid NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY.'
   );
 }
 
 // Client-safe default Supabase instance
-export const supabase: SupabaseClient | null =
-  supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+export const supabase: SupabaseClient | null = safeCreateSupabaseClient(
+  supabaseUrl,
+  supabaseKey
+);
 
 // Server-side privileged Supabase client (prefers SERVICE_ROLE_KEY for serverless mutations)
 export function getSupabaseServerClient(): SupabaseClient | null {
@@ -53,7 +72,7 @@ export function getSupabaseServerClient(): SupabaseClient | null {
     return supabase;
   }
 
-  return createClient(url, key, {
+  return safeCreateSupabaseClient(url, key, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
