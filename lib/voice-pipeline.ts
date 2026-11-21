@@ -7,7 +7,7 @@ export interface RiderFinancialContext {
   id: string;
   name: string;
   balance: number;
-  vault_balance: number;
+  vault_balance: number; // Stored in DB column vault_balance as the protected Bill Shield amount
   daily_earnings: number;
   target_payout: number;
   safety_reserve?: number;
@@ -17,7 +17,7 @@ export interface RiderFinancialContext {
 }
 
 export interface VoiceIntentResult {
-  intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT';
+  intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_BILLS_SHIELD' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT';
   category: 'fuel' | 'food' | 'rent' | 'maintenance' | 'income' | null;
   amount: number | null;
   replyText: string;
@@ -29,12 +29,13 @@ export interface VoicePipelineResponse {
   audioBase64: string | null;
   languageCode: SupportedVoiceLanguage;
   action: {
-    intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT';
+    intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_BILLS_SHIELD' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT';
     category: 'fuel' | 'food' | 'rent' | 'maintenance' | 'income' | null;
     amount: number | null;
     previousBalance: number;
     updatedBalance: number;
-    vaultBalance: number;
+    billShieldBalance: number;
+    vaultBalance: number; // Compatibility alias
     transactionId?: string;
   };
 }
@@ -119,38 +120,97 @@ export async function getRiderFinancialContext(
 
 /**
  * Step A: Send audio to Sarvam AI Speech-To-Text (saaras:v4)
+ * with Automatic Multimodal Gemini Audio Fallback
  */
 export async function runSarvamSTT(
   audioBlob: Blob,
   sarvamApiKey: string,
   languageCode?: SupportedVoiceLanguage
 ): Promise<string> {
-  if (!sarvamApiKey) {
-    throw new Error('SARVAM_API_KEY is missing from server environment variables.');
+  // 1. First priority: Sarvam AI STT if API key is provided
+  if (sarvamApiKey && sarvamApiKey.trim().length > 0) {
+    try {
+      const formData = new FormData();
+      const filename = (audioBlob as File).name || 'audio.webm';
+      formData.append('file', audioBlob, filename);
+      formData.append('model', 'saaras:v4');
+      formData.append('mode', 'codemix');
+      formData.append('language_code', languageCode || 'unknown');
+
+      const response = await fetch('https://api.sarvam.ai/speech-to-text', {
+        method: 'POST',
+        headers: {
+          'api-subscription-key': sarvamApiKey.trim(),
+        },
+        body: formData,
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        if (result?.transcript && typeof result.transcript === 'string') {
+          const text = result.transcript.trim();
+          if (text.length > 0) return text;
+        }
+      } else {
+        const errorText = await response.text().catch(() => '');
+        console.warn(`[SteadyGig] Sarvam STT returned ${response.status}: ${errorText}. Activating Gemini audio fallback.`);
+      }
+    } catch (sarvamErr) {
+      console.warn('[SteadyGig] Sarvam STT request error, activating Gemini audio fallback:', sarvamErr);
+    }
   }
 
-  const formData = new FormData();
-  const filename = (audioBlob as File).name || 'audio.webm';
-  formData.append('file', audioBlob, filename);
-  formData.append('model', 'saaras:v4');
-  formData.append('mode', 'codemix');
-  formData.append('language_code', languageCode || 'unknown');
+  // 2. Second priority: Gemini Multimodal Audio Transcription
+  const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  if (geminiApiKey) {
+    try {
+      const arrayBuf = await audioBlob.arrayBuffer();
+      const base64Audio = Buffer.from(arrayBuf).toString('base64');
+      const mimeType = audioBlob.type || 'audio/webm';
+      const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-  const response = await fetch('https://api.sarvam.ai/speech-to-text', {
-    method: 'POST',
-    headers: {
-      'api-subscription-key': sarvamApiKey,
-    },
-    body: formData,
-  });
+      const langContext =
+        languageCode === 'hi-IN'
+          ? 'Hindi (or Hinglish)'
+          : languageCode === 'en-IN'
+          ? 'Indian English'
+          : 'Kannada (or Kanglish)';
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Sarvam STT failed [${response.status}]: ${errorText}`);
+      const res = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: `You are an accurate Speech-to-Text transcription model for Bengaluru gig delivery riders (Swiggy, Zomato, Domino's, Porter).
+Transcribe the speech from this audio clip in ${langContext}.
+Strict instructions:
+- Return ONLY the exact transcribed words or numbers spoken.
+- Do NOT add quotes, markdown formatting, explanations, or prefixes like "Transcript:".
+- If the rider spoke digits or numbers (like "6000", "six thousand", "ಆರು ಸಾವಿರ", "छह हजार"), transcribe it accurately.`,
+              },
+              {
+                inlineData: {
+                  mimeType: mimeType.startsWith('audio/') ? mimeType : 'audio/webm',
+                  data: base64Audio,
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const transcript = res.text?.trim() || '';
+      if (transcript.length > 0) {
+        return transcript;
+      }
+    } catch (geminiErr) {
+      console.warn('[SteadyGig] Gemini multimodal audio transcription error:', geminiErr);
+    }
   }
 
-  const result = await response.json();
-  return result.transcript || '';
+  return '';
 }
 
 /**
@@ -169,7 +229,7 @@ export async function runSarvamTTS(
     const response = await fetch('https://api.sarvam.ai/text-to-speech', {
       method: 'POST',
       headers: {
-        'api-subscription-key': sarvamApiKey,
+        'api-subscription-key': sarvamApiKey.trim(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -181,7 +241,7 @@ export async function runSarvamTTS(
     });
 
     if (!response.ok) {
-      const errText = await response.text();
+      const errText = await response.text().catch(() => '');
       console.warn(`[SteadyGig Voice] Sarvam TTS error [${response.status}]: ${errText}`);
       return null;
     }
@@ -201,6 +261,8 @@ export async function runSarvamTTS(
  * Deterministic multilingual number parser fallback (digits + common spoken words)
  */
 function parseSpokenNumericValue(transcript: string): number | null {
+  if (!transcript) return null;
+
   // Normalize comma-separated Indian numerals like 12,000
   const normalized = transcript.replace(/,/g, '');
   const digitMatches = normalized.match(/\d+(\.\d+)?/g);
@@ -210,19 +272,27 @@ function parseSpokenNumericValue(transcript: string): number | null {
   }
 
   const lower = normalized.toLowerCase();
-  // Quick word lookup for common onboarding values
   const wordPairs: [RegExp, number][] = [
+    [/\b(eighteen thousand|ಹದಿನೆಂಟು ಸಾವಿರ|अठारह हजार)\b/i, 18000],
     [/\b(fifteen thousand|ಹದಿನೈದು ಸಾವಿರ|पंद्रह हजार)\b/i, 15000],
     [/\b(twelve thousand|ಹನ್ನೆರಡು ಸಾವಿರ|बारह हजार)\b/i, 12000],
     [/\b(ten thousand|ಹತ್ತು ಸಾವಿರ|दस हजार)\b/i, 10000],
+    [/\b(nine thousand|ಒಂಬತ್ತು ಸಾವಿರ|नौ हजार)\b/i, 9000],
     [/\b(eight thousand|ಎಂಟು ಸಾವಿರ|आठ हजार)\b/i, 8000],
+    [/\b(seven thousand|ಏಳು ಸಾವಿರ|सात हजार)\b/i, 7000],
+    [/\b(six thousand|ಆರು ಸಾವಿರ|छह हजार)\b/i, 6000],
     [/\b(five thousand|ಐದು ಸಾವಿರ|पांच हजार)\b/i, 5000],
+    [/\b(four thousand|ನಾಲ್ಕು ಸಾವಿರ|चार हजार)\b/i, 4000],
     [/\b(three thousand|ಮೂರು ಸಾವಿರ|तीन हजार)\b/i, 3000],
     [/\b(two thousand|ಎರಡು ಸಾವಿರ|दो हजार)\b/i, 2000],
+    [/\b(one thousand|ಒಂದು ಸಾವಿರ|एक हजार)\b/i, 1000],
+    [/\b(five hundred|ಐನೂರು|पांच सौ)\b/i, 500],
+    [/\b(four hundred|ನಾನ್ನೂರು|चार सौ)\b/i, 400],
     [/\b(three hundred|ಮೂನ್ನೂರು|तीन सौ)\b/i, 300],
-    [/\b(two fifty|two hundred fifty|ಇನ್ನೂರ ಐವತ್ತು|ढाई सौ)\b/i, 250],
+    [/\b(two fifty|two hundred fifty|ಇನ್ನೂರ ಐವತ್ತು|ढाई सौ|दो सौ पचास)\b/i, 250],
     [/\b(two hundred|ಇನ್ನೂರು|दो सौ)\b/i, 200],
-    [/\b(one fifty|ನೂರ ಐವತ್ತು|डेढ़ सौ)\b/i, 150],
+    [/\b(one fifty|one hundred fifty|ನೂರ ಐವತ್ತು|डेढ़ सौ|एक सौ पचास)\b/i, 150],
+    [/\b(one hundred|ನೂರು|एक सौ)\b/i, 100],
   ];
 
   for (const [pattern, num] of wordPairs) {
@@ -268,7 +338,7 @@ Spoken transcript: "${transcript}"
 Return JSON only: { "extractedValue": number | null }`;
 
       const res = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+        model: 'gemini-2.5-flash',
         contents: prompt,
         config: { responseMimeType: 'application/json' },
       });
@@ -287,28 +357,53 @@ Return JSON only: { "extractedValue": number | null }`;
     }
   }
 
+  // Compose Spoken Read-Back Confirmation
+  let confirmationText = '';
   if (extractedValue !== null) {
-    if (params.step === 2) {
-      extractedValue = Math.min(31, Math.max(1, extractedValue));
+    if (params.step === 1) {
+      confirmationText =
+        params.languageCode === 'hi-IN'
+          ? `मासिक किराया और ईएमआई बिल शील्ड के लिए ₹${extractedValue} दर्ज किया गया।`
+          : params.languageCode === 'en-IN'
+          ? `Recorded ₹${extractedValue} for your monthly Rent & EMI Bill Shield.`
+          : `ತಿಂಗಳ ಬಾಡಿಗೆ ಮತ್ತು ಇಎಂಐ ಬಿಲ್ ಶೀಲ್ಡ್‌ಗೆ ರೂ. ${extractedValue} ದಾಖಲಿಸಲಾಗಿದೆ.`;
+    } else if (params.step === 2) {
+      confirmationText =
+        params.languageCode === 'hi-IN'
+          ? `महीने की ${extractedValue} तारीख को बिल देय तिथि के रूप में सेट किया गया।`
+          : params.languageCode === 'en-IN'
+          ? `Set the ${extractedValue}th of each month as your bill due date.`
+          : `ತಿಂಗಳ ${extractedValue} ನೇ ತಾರೀಖನ್ನು ಬಿಲ್ ಕೊನೆಯ ದಿನಾಂಕವಾಗಿ ನಿಗದಿಪಡಿಸಲಾಗಿದೆ.`;
+    } else if (params.step === 3) {
+      confirmationText =
+        params.languageCode === 'hi-IN'
+          ? `दैनिक बाइक पेट्रोल रिजर्व के लिए ₹${extractedValue} सेट किया गया।`
+          : params.languageCode === 'en-IN'
+          ? `Set ₹${extractedValue} for your daily bike fuel reserve.`
+          : `ದೈನಂದಿನ ಬೈಕ್ ಪೆಟ್ರೋಲ್ ರಕ್ಷಣೆಗೆ ರೂ. ${extractedValue} ನಿಗದಿಪಡಿಸಲಾಗಿದೆ.`;
     } else {
-      extractedValue = Math.max(0, extractedValue);
+      confirmationText =
+        params.languageCode === 'hi-IN'
+          ? `आपका वर्तमान बैलेंस ₹${extractedValue} अपडेट किया गया।`
+          : params.languageCode === 'en-IN'
+          ? `Updated your current cash balance to ₹${extractedValue}.`
+          : `ನಿಮ್ಮ ಪ್ರಸ್ತುತ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${extractedValue} ನವೀಕರಿಸಲಾಗಿದೆ.`;
     }
+  } else {
+    confirmationText =
+      params.languageCode === 'hi-IN'
+        ? 'आवाज स्पष्ट नहीं सुनाई दी, कृपया नीचे दिए गए विकल्पों में से चुनें या लिखें।'
+        : params.languageCode === 'en-IN'
+        ? 'Could not catch the number clearly, please tap a quick option below or type.'
+        : 'ಧ್ವನಿ ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸಲಿಲ್ಲ, ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಬಟನ್ ಒತ್ತಿ ಅಥವಾ ಟೈಪ್ ಮಾಡಿ.';
   }
 
-  const confirmationText = buildOnboardingConfirmationText(
-    params.step,
-    extractedValue,
-    params.languageCode
-  );
-
-  const audioBase64 = await runSarvamTTS(
-    confirmationText,
-    sarvamApiKey,
-    params.languageCode
-  );
+  const audioBase64 = confirmationText
+    ? await runSarvamTTS(confirmationText, sarvamApiKey, params.languageCode)
+    : null;
 
   return {
-    transcript,
+    transcript: transcript || '(No speech detected)',
     extractedValue,
     confirmationText,
     audioBase64,
@@ -316,54 +411,8 @@ Return JSON only: { "extractedValue": number | null }`;
   };
 }
 
-function buildOnboardingConfirmationText(
-  step: 1 | 2 | 3 | 4,
-  value: number | null,
-  lang: SupportedVoiceLanguage
-): string {
-  if (value === null) {
-    if (lang === 'kn-IN') {
-      return 'ಸಂಖ್ಯೆ ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸಲಿಲ್ಲ. ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ಹೇಳಿ ಅಥವಾ ಕೆಳಗೆ ಟ್ಯಾಪ್ ಮಾಡಿ.';
-    }
-    if (lang === 'hi-IN') {
-      return 'संख्या साफ़ सुनाई नहीं दी। कृपया फिर से बोलें या नीचे टैप करें।';
-    }
-    return 'I could not catch the number clearly. Please speak again or tap an amount below.';
-  }
-
-  if (step === 2) {
-    if (lang === 'kn-IN') {
-      return `ಸರಿ, ನಿಮ್ಮ ಮುಂದಿನ ಬಿಲ್ ದಿನಾಂಕ ತಿಂಗಳ ${value} ನೇ ತಾರೀಖು ಎಂದು ನಮೂದಿಸಲಾಗಿದೆ.`;
-    }
-    if (lang === 'hi-IN') {
-      return `ठीक है, आपके अगले बिल की तारीख महीने की ${value} तारीख दर्ज की गई है।`;
-    }
-    return `Got it, your next major bill due date is day ${value} of the month.`;
-  }
-
-  const labels: Record<1 | 3 | 4, Record<SupportedVoiceLanguage, string>> = {
-    1: {
-      'kn-IN': `ಸರಿ, ತಿಂಗಳ ಬಾಡಿಗೆ ಮತ್ತು ಇಎಂಐ ರೂ. ${value} ಎಂದು ದಾಖಲಿಸಲಾಗಿದೆ.`,
-      'hi-IN': `ठीक है, आपका मासिक किराया और ईएमआई ₹${value} दर्ज किया गया है।`,
-      'en-IN': `Got it, ₹${value.toLocaleString('en-IN')} saved for your monthly rent and EMI bills.`,
-    },
-    3: {
-      'kn-IN': `ಸರಿ, ಪ್ರತಿದಿನದ ಬೈಕ್ ಪೆಟ್ರೋಲ್ ಖರ್ಚು ರೂ. ${value} ಎಂದು ದಾಖಲಿಸಲಾಗಿದೆ.`,
-      'hi-IN': `ठीक है, रोज़ का बाइक पेट्रोल खर्च ₹${value} दर्ज किया गया है।`,
-      'en-IN': `Got it, ₹${value.toLocaleString('en-IN')} set for your daily bike fuel reserve.`,
-    },
-    4: {
-      'kn-IN': `ಸರಿ, ನಿಮ್ಮ ಪ್ರಸ್ತುತ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${value} ಎಂದು ದಾಖಲಿಸಲಾಗಿದೆ.`,
-      'hi-IN': `ठीक है, आपका वर्तमान बैलेंस ₹${value} दर्ज किया गया है।`,
-      'en-IN': `Got it, ₹${value.toLocaleString('en-IN')} recorded as your current cash and bank balance.`,
-    },
-  };
-
-  return labels[step][lang];
-}
-
 /**
- * Step B: Multilingual Intent & Action Extraction using Gemini 4 Hydrogen
+ * Step B: Intent & Action Extraction using Gemini Flash
  */
 export async function extractIntentAndReply(
   transcript: string,
@@ -371,28 +420,35 @@ export async function extractIntentAndReply(
   geminiApiKey: string,
   languageCode: SupportedVoiceLanguage = 'kn-IN'
 ): Promise<VoiceIntentResult> {
-  const langInstruction =
-    languageCode === 'hi-IN'
-      ? 'Respond in natural conversational Hindi (Devanagari script: हिन्दी).'
-      : languageCode === 'en-IN'
-      ? 'Respond in clear, simple Indian English.'
-      : 'Respond in natural conversational Bengaluru Kannada (Kannada script: ಕನ್ನಡ ಲಿಪಿ).';
+  const fuelDaily = rider.daily_fuel_spend || 250;
+  const fuelProtected = Math.min(rider.balance, fuelDaily * 2);
+  const afterFuel = Math.max(0, rider.balance - fuelProtected);
+  const monthlyBills = rider.monthly_fixed_bills || 12000;
+  const billProtected = Math.min(monthlyBills, afterFuel);
+  const spendable = Math.max(0, rider.balance - fuelProtected - billProtected);
 
   if (!transcript || transcript.trim().length === 0) {
-    const emptyMsg =
+    const defaultReply =
       languageCode === 'hi-IN'
-        ? `आवाज़ साफ़ नहीं आई। आपका कुल बैलेंस ₹${rider.balance} है और मासिक बिल लक्ष्य ₹${rider.monthly_fixed_bills || 12000} है।`
+        ? `आपकी आवाज सुनाई नहीं दी। आपके ₹${billProtected} बिल शील्ड में और ₹${fuelProtected} पेट्रोल के लिए सुरक्षित हैं।`
         : languageCode === 'en-IN'
-        ? `I didn't hear anything clearly. Your current balance is ₹${rider.balance} and your monthly bill target is ₹${rider.monthly_fixed_bills || 12000}.`
-        : `ನಿಮ್ಮ ಧ್ವನಿ ಕೇಳಿಸಲಿಲ್ಲ. ನಿಮ್ಮ ಪ್ರಸ್ತುತ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${rider.balance} ಇದೆ.`;
+        ? `Could not hear your voice clearly. ₹${billProtected} is protected in your Bill Shield and ₹${fuelProtected} for fuel.`
+        : `ನಿಮ್ಮ ಧ್ವನಿ ಕೇಳಿಸಲಿಲ್ಲ. ನಿಮ್ಮ ರೂ. ${billProtected} ಬಿಲ್ ಶೀಲ್ಡ್‌ನಲ್ಲಿ ಮತ್ತು ರೂ. ${fuelProtected} ಪೆಟ್ರೋಲ್‌ಗೆ ಸುರಕ್ಷಿತವಾಗಿದೆ.`;
 
     return {
-      intent: 'CHECK_VAULT',
+      intent: 'CHECK_BILLS_SHIELD',
       category: null,
       amount: null,
-      replyText: emptyMsg,
+      replyText: defaultReply,
     };
   }
+
+  const langInstruction =
+    languageCode === 'hi-IN'
+      ? 'Speak natural conversational Hindi in Devanagari script (हिन्दी).'
+      : languageCode === 'en-IN'
+      ? 'Speak natural Indian English.'
+      : 'Speak natural Bengaluru conversational Kannada in Kannada script (ಕನ್ನಡ ಲಿಪಿ).';
 
   if (geminiApiKey) {
     try {
@@ -403,32 +459,33 @@ export async function extractIntentAndReply(
 
 Rider Financial Context:
 - Rider Name: ${rider.name}
-- Current Cash/Bank Balance: ₹${rider.balance}
-- Monthly Fixed Bills (Rent + EMI): ₹${rider.monthly_fixed_bills || 12000} (Due on day ${rider.bill_due_day || 5})
-- Daily Bike Fuel Spend: ₹${rider.daily_fuel_spend || 250}
-- Bill Shield Protected: ₹${rider.vault_balance}
+- Total Available Cash: ₹${rider.balance}
+- Monthly Fixed Bills (Rent + EMI): ₹${monthlyBills} (Due on day ${rider.bill_due_day || 5})
+- Bike Fuel Reserve Protected: ₹${fuelProtected} (2 working shifts covered)
+- Upcoming Bills Shield Protected: ₹${billProtected}
+- True Spendable Cash (Safe Guilt-Free): ₹${spendable}
 
 Task:
-You are SteadyGig's voice financial co-pilot for gig delivery riders.
+You are SteadyGig's voice financial co-pilot for Bengaluru gig delivery riders.
 Analyze the transcript and return a single JSON object:
-1. "intent": "LOG_EXPENSE", "LOG_INCOME", "CHECK_VAULT", or "SIMULATE_PAYOUT".
+1. "intent": "LOG_EXPENSE", "LOG_INCOME", "CHECK_BILLS_SHIELD", or "SIMULATE_PAYOUT".
 2. "category": If LOG_EXPENSE -> "fuel", "food", "rent", or "maintenance". If LOG_INCOME -> "income". Else null.
 3. "amount": Numeric ₹ amount mentioned, or null.
-4. "replyText": A concise 1–2 sentence reply. ${langInstruction}
-   - If LOG_EXPENSE: confirm expense of ₹amount logged and state updated balance.
-   - If LOG_INCOME: confirm ₹amount earnings added and state updated balance.
-   - If CHECK_VAULT / SIMULATE_PAYOUT: state how much is protected for Rent/EMI Bills & Bike Fuel vs remaining balance.
+4. "replyText": A concise 1–2 sentence spoken reply. ${langInstruction}
+   - If LOG_EXPENSE: confirm expense of ₹amount logged and state updated remaining spendable cash.
+   - If LOG_INCOME: confirm ₹amount earnings added and mention how it strengthens their Bill Shield and spendable balance.
+   - If CHECK_BILLS_SHIELD / SIMULATE_PAYOUT: state how much is protected in their Upcoming Bills Shield (Rent + EMI) & Fuel Reserve vs remaining spendable cash.
 
 Required JSON Schema:
 {
-  "intent": "LOG_EXPENSE" | "LOG_INCOME" | "CHECK_VAULT" | "SIMULATE_PAYOUT",
+  "intent": "LOG_EXPENSE" | "LOG_INCOME" | "CHECK_BILLS_SHIELD" | "SIMULATE_PAYOUT",
   "category": "fuel" | "food" | "rent" | "maintenance" | "income" | null,
   "amount": number | null,
   "replyText": string
 }`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+        model: 'gemini-2.5-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -440,7 +497,7 @@ Required JSON Schema:
         const parsed = JSON.parse(responseText);
         if (parsed && parsed.intent && parsed.replyText) {
           return {
-            intent: parsed.intent,
+            intent: parsed.intent === 'CHECK_VAULT' ? 'CHECK_BILLS_SHIELD' : parsed.intent,
             category: parsed.category || null,
             amount: typeof parsed.amount === 'number' ? parsed.amount : null,
             replyText: parsed.replyText,
@@ -463,6 +520,13 @@ function fallbackIntentExtractor(
   const lower = transcript.toLowerCase();
   const parsedAmount = parseSpokenNumericValue(transcript);
 
+  const fuelDaily = rider.daily_fuel_spend || 250;
+  const fuelProtected = Math.min(rider.balance, fuelDaily * 2);
+  const afterFuel = Math.max(0, rider.balance - fuelProtected);
+  const monthlyBills = rider.monthly_fixed_bills || 12000;
+  const billProtected = Math.min(monthlyBills, afterFuel);
+  const spendable = Math.max(0, rider.balance - fuelProtected - billProtected);
+
   if (
     lower.includes('petrol') ||
     lower.includes('fuel') ||
@@ -470,7 +534,7 @@ function fallbackIntentExtractor(
     lower.includes('ಪೆಟ್ರೋಲ್') ||
     lower.includes('पेट्रोल')
   ) {
-    const amt = parsedAmount || rider.daily_fuel_spend || 200;
+    const amt = parsedAmount || fuelDaily || 200;
     const remaining = Math.max(0, rider.balance - amt);
     return {
       intent: 'LOG_EXPENSE',
@@ -488,15 +552,16 @@ function fallbackIntentExtractor(
   if (
     lower.includes('food') ||
     lower.includes('lunch') ||
-    lower.includes('dinner') ||
-    lower.includes('tea') ||
+    lower.includes('tiffin') ||
     lower.includes('oota') ||
+    lower.includes('tea') ||
+    lower.includes('coffee') ||
     lower.includes('ಊಟ') ||
     lower.includes('ತಿಂಡಿ') ||
     lower.includes('खाना') ||
     lower.includes('चाय')
   ) {
-    const amt = parsedAmount || 100;
+    const amt = parsedAmount || 90;
     const remaining = Math.max(0, rider.balance - amt);
     return {
       intent: 'LOG_EXPENSE',
@@ -504,43 +569,48 @@ function fallbackIntentExtractor(
       amount: amt,
       replyText:
         lang === 'hi-IN'
-          ? `₹${amt} खाने का खर्च दर्ज हो गया। बचा हुआ बैलेंस ₹${remaining} है।`
+          ? `₹${amt} भोजन और चाय का खर्च दर्ज किया गया।`
           : lang === 'en-IN'
-          ? `Logged ₹${amt} food expense. Remaining balance is ₹${remaining}.`
-          : `ರೂ. ${amt} ಊಟದ ಖರ್ಚು ಸೇರಿಸಲಾಗಿದೆ. ಉಳಿದ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${remaining} ಆಗಿದೆ.`,
+          ? `Logged ₹${amt} food & refreshment expense.`
+          : `ರೂ. ${amt} ಊಟ ಮತ್ತು ತಿಂಡಿ ಖರ್ಚು ಸೇರಿಸಲಾಗಿದೆ.`,
     };
   }
 
   if (
-    lower.includes('rent') ||
-    lower.includes('emi') ||
-    lower.includes('bill') ||
-    lower.includes('ಬಾಡಿಗೆ') ||
-    lower.includes('किराया')
+    lower.includes('service') ||
+    lower.includes('puncture') ||
+    lower.includes('oil') ||
+    lower.includes('repair') ||
+    lower.includes('ರಿಪೇರಿ') ||
+    lower.includes('ಮೈಂಟೆನೆನ್ಸ್') ||
+    lower.includes('पंचर')
   ) {
-    const amt = parsedAmount || 1000;
+    const amt = parsedAmount || 250;
     const remaining = Math.max(0, rider.balance - amt);
     return {
       intent: 'LOG_EXPENSE',
-      category: 'rent',
+      category: 'maintenance',
       amount: amt,
       replyText:
         lang === 'hi-IN'
-          ? `₹${amt} किराया या बिल खर्च दर्ज किया गया। शेष बैलेंस ₹${remaining} है।`
+          ? `₹${amt} बाइक रखरखाव व मरम्मत दर्ज की गई। शेष राशि ₹${remaining} है।`
           : lang === 'en-IN'
-          ? `Logged ₹${amt} rent or bill payment. Remaining balance is ₹${remaining}.`
-          : `ರೂ. ${amt} ಬಾಡಿಗೆ ಖರ್ಚು ದಾಖಲಾಗಿದೆ. ಉಳಿದ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${remaining} ಆಗಿದೆ.`,
+          ? `Logged ₹${amt} bike maintenance expense. Remaining balance is ₹${remaining}.`
+          : `ರೂ. ${amt} ಬೈಕ್ ರಿಪೇರಿ ಖರ್ಚು ದಾಖಲಾಗಿದೆ. ಉಳಿದ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${remaining} ಆಗಿದೆ.`,
     };
   }
 
   if (
-    lower.includes('earned') ||
-    lower.includes('income') ||
     lower.includes('payout') ||
+    lower.includes('earning') ||
+    lower.includes('income') ||
+    lower.includes('tip') ||
+    lower.includes('orders') ||
     lower.includes('ಗಳಿಕೆ') ||
+    lower.includes('ಕಮಾಯಿ') ||
     lower.includes('कमाई')
   ) {
-    const amt = parsedAmount || 500;
+    const amt = parsedAmount || 850;
     const updated = rider.balance + amt;
     return {
       intent: 'LOG_INCOME',
@@ -548,57 +618,60 @@ function fallbackIntentExtractor(
       amount: amt,
       replyText:
         lang === 'hi-IN'
-          ? `₹${amt} की कमाई जोड़ दी गई है। आपका नया बैलेंस ₹${updated} है।`
+          ? `₹${amt} की नई डिलीवरी कमाई जोड़ दी गई! आपका नया बैलेंस ₹${updated} है।`
           : lang === 'en-IN'
-          ? `Added ₹${amt} earnings. Your updated balance is ₹${updated}.`
-          : `ರೂ. ${amt} ಗಳಿಕೆ ಸೇರಿಸಲಾಗಿದೆ. ನಿಮ್ಮ ಹೊಸ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${updated} ಆಗಿದೆ.`,
+          ? `Added ₹${amt} delivery earnings! Your new balance is ₹${updated}.`
+          : `ರೂ. ${amt} ಡೆಲಿವರಿ ಗಳಿಕೆ ಸೇರಿಸಲಾಗಿದೆ! ನಿಮ್ಮ ಹೊಸ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${updated} ಆಗಿದೆ.`,
     };
   }
 
+  // Default: Check Upcoming Bills Shield Status
   return {
-    intent: 'CHECK_VAULT',
+    intent: 'CHECK_BILLS_SHIELD',
     category: null,
     amount: null,
     replyText:
       lang === 'hi-IN'
-        ? `आपका कुल बैलेंस ₹${rider.balance} है। मासिक बिल लक्ष्य ₹${rider.monthly_fixed_bills || 12000} और रोज़ पेट्रोल ₹${rider.daily_fuel_spend || 250} है।`
+        ? `आपके ₹${rider.balance} बैलेंस में से ₹${fuelProtected} बाइक पेट्रोल के लिए और ₹${billProtected} किराया व ईएमआई बिल शील्ड में सुरक्षित हैं। खर्च के लिए ₹${spendable} उपलब्ध हैं।`
         : lang === 'en-IN'
-        ? `Your total balance is ₹${rider.balance}. Monthly bills target is ₹${rider.monthly_fixed_bills || 12000} with ₹${rider.daily_fuel_spend || 250} daily bike fuel.`
-        : `ನಿಮ್ಮ ಪ್ರಸ್ತುತ ಬ್ಯಾಲೆನ್ಸ್ ರೂ. ${rider.balance} ಇದೆ. ತಿಂಗಳ ಬಿಲ್ ಗುರಿ ರೂ. ${rider.monthly_fixed_bills || 12000} ಮತ್ತು ದಿನದ ಪೆಟ್ರೋಲ್ ರೂ. ${rider.daily_fuel_spend || 250}.`,
+        ? `Out of ₹${rider.balance}, ₹${fuelProtected} is reserved for fuel and ₹${billProtected} is shielded for your rent and EMI bills, leaving ₹${spendable} spendable.`
+        : `ನಿಮ್ಮ ರೂ. ${rider.balance} ರಲ್ಲಿ ರೂ. ${fuelProtected} ಬೈಕ್ ಪೆಟ್ರೋಲ್‌ಗಾಗಿ ಮತ್ತು ರೂ. ${billProtected} ಬಾಡಿಗೆ-ಇಎಂಐ ಬಿಲ್ ಶೀಲ್ಡ್‌ನಲ್ಲಿ ಸುರಕ್ಷಿತವಾಗಿದೆ. ಖರ್ಚಿಗೆ ರೂ. ${spendable} ಲಭ್ಯವಿದೆ.`,
   };
 }
 
 /**
- * Step C: Supabase Mutation (Expense or Income)
+ * Step C: Supabase Mutation
  */
 export async function mutateRiderTransaction(
   rider: RiderFinancialContext,
-  intent: 'LOG_EXPENSE' | 'LOG_INCOME',
+  intent: 'LOG_EXPENSE' | 'LOG_INCOME' | 'CHECK_BILLS_SHIELD' | 'CHECK_VAULT' | 'SIMULATE_PAYOUT',
   category: 'fuel' | 'food' | 'rent' | 'maintenance' | 'income' | null,
   amount: number
 ): Promise<{ updatedBalance: number; transactionId?: string }> {
-  const updatedBalance =
-    intent === 'LOG_INCOME'
-      ? rider.balance + amount
-      : Math.max(0, rider.balance - amount);
+  const isIncome = intent === 'LOG_INCOME';
+  const updatedBalance = isIncome
+    ? rider.balance + amount
+    : Math.max(0, rider.balance - amount);
 
   const supabase = getSupabaseServerClient();
+
   if (!supabase) {
     return { updatedBalance };
   }
 
   try {
-    const txType = intent === 'LOG_INCOME' ? 'income' : 'expense';
-    const txCat = intent === 'LOG_INCOME' ? 'income' : category || 'fuel';
+    const txCategory =
+      category || (isIncome ? 'income' : 'fuel');
+    const txType = isIncome ? 'income' : 'expense';
 
     const { data: tx, error: txError } = await supabase
       .from('transactions')
       .insert({
         rider_id: rider.id,
-        category: txCat,
+        category: txCategory,
         amount,
         type: txType,
-        description: `Voice logged: ${txCat} (₹${amount})`,
+        description: `Voice logged: ${txCategory} (₹${amount})`,
         created_at: new Date().toISOString(),
       })
       .select('id')
@@ -631,14 +704,15 @@ export async function mutateRiderTransaction(
 }
 
 /**
- * Speak Current Bill Shield + Fuel Reserve Status Aloud
+ * Speak Current Bill Shield & Fuel Reserve Status Aloud
  */
-export async function readVaultStatusAloud(
+export async function readBillShieldStatusAloud(
   userId: string,
   languageCode: SupportedVoiceLanguage = 'kn-IN'
 ): Promise<VoicePipelineResponse> {
   const sarvamApiKey = process.env.SARVAM_API_KEY || '';
   const rider = await getRiderFinancialContext(userId);
+
   const fuelDaily = rider.daily_fuel_spend || 250;
   const fuelProtected = Math.min(rider.balance, fuelDaily * 2);
   const afterFuel = Math.max(0, rider.balance - fuelProtected);
@@ -651,7 +725,7 @@ export async function readVaultStatusAloud(
       ? `आपके ₹${rider.balance} बैलेंस में से ₹${fuelProtected} बाइक पेट्रोल के लिए और ₹${billProtected} किराया व ईएमआई बिल शील्ड में सुरक्षित हैं। अभी ₹${spendable} बिना चिंता के खर्च करने के लिए बचे हैं।`
       : languageCode === 'en-IN'
       ? `Out of ₹${rider.balance}, ₹${fuelProtected} is protected for bike fuel and ₹${billProtected} is shielded for your upcoming rent and EMI bills. You have ₹${spendable} in spendable cash.`
-      : `ನಿಮ್ಮ ರೂ. ${rider.balance} ರಲ್ಲಿ ರೂ. ${fuelProtected} ಬೈಕ್ ಪೆಟ್ರೋಲ್‌ಗಾಗಿ ಮತ್ತು ರೂ. ${billProtected} ತಿಂಗಳ ಬಿಲ್ ಶೀಲ್ಡ್‌ನಲ್ಲಿ ಸುರಕ್ಷಿತವಾಗಿದೆ. ಖರ್ಚಿಗೆ ರೂ. ${spendable} ಲಭ್ಯವಿದೆ.`;
+      : `ನಿಮ್ಮ ರೂ. ${rider.balance} ರಲ್ಲಿ ರೂ. ${fuelProtected} ಬೈಕ್ ಪೆಟ್ರೋಲ್‌ಗಾಗಿ ಮತ್ತು ರೂ. ${billProtected} ತಿಂಗಳ ಬಾಡಿಗೆ ಮತ್ತು ಇಎಂಐ ಬಿಲ್ ಶೀಲ್ಡ್‌ನಲ್ಲಿ ಸುರಕ್ಷಿತವಾಗಿದೆ. ಖರ್ಚಿಗೆ ರೂ. ${spendable} ಲಭ್ಯವಿದೆ.`;
 
   const audioBase64 = await runSarvamTTS(replyText, sarvamApiKey, languageCode);
 
@@ -666,15 +740,19 @@ export async function readVaultStatusAloud(
     audioBase64,
     languageCode,
     action: {
-      intent: 'CHECK_VAULT',
+      intent: 'CHECK_BILLS_SHIELD',
       category: null,
       amount: null,
       previousBalance: rider.balance,
       updatedBalance: rider.balance,
-      vaultBalance: billProtected,
+      billShieldBalance: billProtected,
+      vaultBalance: billProtected, // Compatibility alias
     },
   };
 }
+
+// Backwards compatibility alias
+export const readVaultStatusAloud = readBillShieldStatusAloud;
 
 /**
  * Complete End-to-End Multilingual Voice Assistant Pipeline
@@ -720,8 +798,14 @@ export async function executeVoicePipeline(
     languageCode
   );
 
+  const fuelDaily = riderContext.daily_fuel_spend || 250;
+  const fuelProtected = Math.min(updatedBalance, fuelDaily * 2);
+  const afterFuel = Math.max(0, updatedBalance - fuelProtected);
+  const monthlyBills = riderContext.monthly_fixed_bills || 12000;
+  const billProtected = Math.min(monthlyBills, afterFuel);
+
   return {
-    transcript,
+    transcript: transcript || '(No speech detected)',
     replyText: extraction.replyText,
     audioBase64,
     languageCode,
@@ -731,7 +815,8 @@ export async function executeVoicePipeline(
       amount: extraction.amount,
       previousBalance: riderContext.balance,
       updatedBalance,
-      vaultBalance: riderContext.vault_balance,
+      billShieldBalance: billProtected,
+      vaultBalance: billProtected, // Compatibility alias
       transactionId,
     },
   };

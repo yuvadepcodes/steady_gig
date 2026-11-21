@@ -413,7 +413,7 @@ export default function MinimalRiderHome() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] pb-28 text-[#0F172A]">
+    <div suppressHydrationWarning className="min-h-screen bg-[#F8FAFC] pb-28 text-[#0F172A]">
       {/* Clean 3-Zone Top Header */}
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex h-16 max-w-[1380px] items-center justify-between gap-4 px-4 sm:px-6">

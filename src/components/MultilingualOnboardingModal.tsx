@@ -337,10 +337,73 @@ export default function MultilingualOnboardingModal({
     else setCurrentBalance(clean);
   };
 
+  const clientSpeechRef = useRef<any>(null);
+  const clientTranscriptRef = useRef<string>('');
+
+  const parseClientNumber = (text: string): number | null => {
+    if (!text) return null;
+    const clean = text.replace(/,/g, '');
+    const numMatch = clean.match(/\d+(\.\d+)?/g);
+    if (numMatch && numMatch.length > 0) {
+      const val = parseFloat(numMatch[0]);
+      if (Number.isFinite(val)) return Math.round(val);
+    }
+    const lower = clean.toLowerCase();
+    const lookup: [RegExp, number][] = [
+      [/\b(eighteen thousand|ಹದಿನೆಂಟು ಸಾವಿರ|अठारह हजार)\b/i, 18000],
+      [/\b(fifteen thousand|ಹದಿನೈದು ಸಾವಿರ|पंद्रह हजार)\b/i, 15000],
+      [/\b(twelve thousand|ಹನ್ನೆರಡು ಸಾವಿರ|बारह हजार)\b/i, 12000],
+      [/\b(ten thousand|ಹತ್ತು ಸಾವಿರ|दस हजार)\b/i, 10000],
+      [/\b(nine thousand|ಒಂಬತ್ತು ಸಾವಿರ|नौ हजार)\b/i, 9000],
+      [/\b(eight thousand|ಎಂಟು ಸಾವಿರ|आठ हजार)\b/i, 8000],
+      [/\b(seven thousand|ಏಳು ಸಾವಿರ|सात हजार)\b/i, 7000],
+      [/\b(six thousand|ಆರು ಸಾವಿರ|छह हजार)\b/i, 6000],
+      [/\b(five thousand|ಐದು ಸಾವಿರ|पांच हजार)\b/i, 5000],
+      [/\b(four thousand|ನಾಲ್ಕು ಸಾವಿರ|चार हजार)\b/i, 4000],
+      [/\b(three thousand|ಮೂರು ಸಾವಿರ|तीन हजार)\b/i, 3000],
+      [/\b(two thousand|ಎರಡು ಸಾವಿರ|दो हजार)\b/i, 2000],
+      [/\b(one thousand|ಒಂದು ಸಾವಿರ|एक हजार)\b/i, 1000],
+      [/\b(five hundred|ಐನೂರು|पांच सौ)\b/i, 500],
+      [/\b(two fifty|two hundred fifty|ಇನ್ನೂರ ಐವತ್ತು|ढाई सौ|दो सौ पचास)\b/i, 250],
+      [/\b(two hundred|ಇನ್ನೂರು|दो सौ)\b/i, 200],
+    ];
+    for (const [p, n] of lookup) {
+      if (p.test(lower)) return n;
+    }
+    return null;
+  };
+
   const startVoiceAnswer = async () => {
     try {
       stopAnyAudio();
       setVoiceError(null);
+      clientTranscriptRef.current = '';
+
+      // Start on-device browser SpeechRecognition in parallel if available
+      if (typeof window !== 'undefined') {
+        const SpeechRec =
+          (window as any).SpeechRecognition ||
+          (window as any).webkitSpeechRecognition;
+        if (SpeechRec) {
+          try {
+            const rec = new SpeechRec();
+            rec.continuous = false;
+            rec.interimResults = true;
+            rec.lang = lang === 'hi-IN' ? 'hi-IN' : lang === 'en-IN' ? 'en-IN' : 'kn-IN';
+            rec.onresult = (ev: any) => {
+              const res = ev.results[ev.results.length - 1];
+              if (res && res[0]) {
+                clientTranscriptRef.current = res[0].transcript;
+              }
+            };
+            rec.start();
+            clientSpeechRef.current = rec;
+          } catch {
+            // Ignore speech recognition startup errors
+          }
+        }
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mimeTypes = [
         'audio/webm;codecs=opus',
@@ -368,6 +431,13 @@ export default function MultilingualOnboardingModal({
           type: mimeType || 'audio/webm',
         });
         stream.getTracks().forEach((t) => t.stop());
+        if (clientSpeechRef.current) {
+          try {
+            clientSpeechRef.current.stop();
+          } catch {
+            // ignore
+          }
+        }
         await submitVoiceAnswer(blob);
       };
 
@@ -401,35 +471,77 @@ export default function MultilingualOnboardingModal({
         body: formData,
       });
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Could not process voice answer');
+      if (res.ok) {
+        const data = (await res.json()) as {
+          transcript?: string;
+          extractedValue?: number | null;
+          confirmationText?: string;
+          audioBase64?: string | null;
+        };
+
+        if (data.transcript && data.transcript !== '(No speech detected)') {
+          setVoiceTranscript(data.transcript);
+        }
+        if (typeof data.extractedValue === 'number') {
+          setCurrentVal(data.extractedValue);
+        } else if (clientTranscriptRef.current) {
+          const clientParsed = parseClientNumber(clientTranscriptRef.current);
+          if (clientParsed !== null) {
+            setCurrentVal(clientParsed);
+            setVoiceTranscript(clientTranscriptRef.current);
+          }
+        }
+        if (data.confirmationText) {
+          setReadBackText(data.confirmationText);
+        }
+        if (data.audioBase64) {
+          playBase64Audio(data.audioBase64);
+        } else if (data.confirmationText) {
+          speakBrowserFallback(data.confirmationText, lang);
+        }
+        return;
       }
 
-      const data = (await res.json()) as {
-        transcript?: string;
-        extractedValue?: number | null;
-        confirmationText?: string;
-        audioBase64?: string | null;
-      };
+      // If server returned error, check if client speech recognition captured speech
+      if (clientTranscriptRef.current) {
+        const localVal = parseClientNumber(clientTranscriptRef.current);
+        if (localVal !== null) {
+          setCurrentVal(localVal);
+          setVoiceTranscript(clientTranscriptRef.current);
+          const feedback =
+            lang === 'hi-IN'
+              ? `₹${localVal} दर्ज किया गया।`
+              : lang === 'en-IN'
+              ? `Recorded ₹${localVal}.`
+              : `ರೂ. ${localVal} ದಾಖಲಿಸಲಾಗಿದೆ.`;
+          setReadBackText(feedback);
+          speakBrowserFallback(feedback, lang);
+          return;
+        }
+      }
 
-      if (data.transcript) setVoiceTranscript(data.transcript);
-      if (typeof data.extractedValue === 'number') {
-        setCurrentVal(data.extractedValue);
-      }
-      if (data.confirmationText) {
-        setReadBackText(data.confirmationText);
-      }
-      if (data.audioBase64) {
-        playBase64Audio(data.audioBase64);
-      } else if (data.confirmationText) {
-        speakBrowserFallback(data.confirmationText, lang);
-      }
-    } catch (err) {
       setVoiceError(
-        err instanceof Error
-          ? err.message
-          : 'Voice recognition unavailable. Tap a value or type below.'
+        lang === 'kn-IN'
+          ? 'ಧ್ವನಿ ಗುರುತಿಸಲು ಸಾಧ್ಯವಾಗಿಲ್ಲ, ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಬಟನ್ ಆಯ್ಕೆಮಾಡಿ ಅಥವಾ ಟೈಪ್ ಮಾಡಿ.'
+          : lang === 'hi-IN'
+          ? 'आवाज स्पष्ट नहीं सुनाई दी, कृपया नीचे से चुनें या टाइप करें।'
+          : 'Could not detect amount clearly. Please tap a chip below or type.'
+      );
+    } catch {
+      if (clientTranscriptRef.current) {
+        const localVal = parseClientNumber(clientTranscriptRef.current);
+        if (localVal !== null) {
+          setCurrentVal(localVal);
+          setVoiceTranscript(clientTranscriptRef.current);
+          return;
+        }
+      }
+      setVoiceError(
+        lang === 'kn-IN'
+          ? 'ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಬಟನ್ ಆಯ್ಕೆಮಾಡಿ ಅಥವಾ ಟೈಪ್ ಮಾಡಿ.'
+          : lang === 'hi-IN'
+          ? 'कृपया नीचे दिए गए विकल्पों में से चुनें या टाइप करें।'
+          : 'Please tap a quick option below or type the amount.'
       );
     } finally {
       setIsProcessingVoice(false);

@@ -626,7 +626,7 @@ export function computeWeekPlan(
       recommendation =
         recommendedSavings > 0
           ? `Low day; cap discretionary spend and save ₹${recommendedSavings}.`
-          : 'Low-income day; avoid extra spend and hold vault reserve.';
+          : 'Low-income day; avoid extra spend and protect your Bill Shield.';
     }
 
     return {

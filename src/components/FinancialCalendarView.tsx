@@ -471,7 +471,7 @@ export default function FinancialCalendarView({
         if (onVaultUpdated) onVaultUpdated();
       }
       setStatusMessage(
-        `Saved ${formatINR(saveAmount)} from ${selectedDayInsight.dateISO} into your Emergency Reserve Vault.`
+        `Shielded ${formatINR(saveAmount)} from ${selectedDayInsight.dateISO} into your Upcoming Bills Shield (Rent + EMI).`
       );
     } finally {
       setLockingVault(false);
@@ -1630,10 +1630,10 @@ export default function FinancialCalendarView({
                     <ArrowUpRight className="h-3.5 w-3.5 shrink-0" />
                     <span>
                       {lockingVault
-                        ? 'Saving...'
-                        : `Save ${formatINR(
+                        ? 'Shielding...'
+                        : `Shield ${formatINR(
                             selectedDayInsight.recommendedSavings
-                          )} to Vault`}
+                          )} for Rent/EMI`}
                     </span>
                   </button>
                 </div>

@@ -251,18 +251,18 @@ export default function SarvamVoiceAssistant({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'read_vault',
+          action: 'read_bill_shield',
           userId,
           languageCode,
         }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to read vault status.');
+        throw new Error('Failed to read Bill Shield status.');
       }
 
       const data = await response.json();
-      setTranscript(data.transcript || 'Vault Status Check');
+      setTranscript(data.transcript || 'Bill Shield Status Check');
       setReplyText(data.replyText || '');
       setActionData(data.action || null);
       setAudioBase64(data.audioBase64 || null);
@@ -275,7 +275,7 @@ export default function SarvamVoiceAssistant({
       router.refresh();
     } catch {
       setErrorMessage(
-        'ವಾಲ್ಟ್ ಸ್ಥಿತಿ ಓದಲು ಸಾಧ್ಯವಾಗಿಲ್ಲ · Could not read vault status.'
+        'ಬಿಲ್ ಶೀಲ್ಡ್ ಸ್ಥಿತಿ ಓದಲು ಸಾಧ್ಯವಾಗಿಲ್ಲ · Could not read Bill Shield status.'
       );
     } finally {
       setIsProcessing(false);
