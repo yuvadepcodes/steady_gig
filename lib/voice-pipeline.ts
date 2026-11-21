@@ -136,34 +136,84 @@ export async function getRiderFinancialContext(
   }
 }
 
+export type AudioInput =
+  | Blob
+  | {
+      buffer: Buffer | Uint8Array;
+      mimeType?: string | null;
+      filename?: string | null;
+    };
+
+export function normalizeAudioMimeType(rawMime?: string | null): string {
+  const base = (rawMime || 'audio/webm').toLowerCase().split(';')[0].trim();
+  if (!base || base === 'application/octet-stream' || base === 'video/webm') {
+    return 'audio/webm';
+  }
+  return base;
+}
+
+function getAudioFilenameForMime(cleanMime: string): string {
+  if (cleanMime.includes('mp4')) return 'recording.mp4';
+  if (cleanMime.includes('wav')) return 'recording.wav';
+  if (cleanMime.includes('ogg')) return 'recording.ogg';
+  if (cleanMime.includes('mpeg') || cleanMime.includes('mp3')) return 'recording.mp3';
+  return 'recording.webm';
+}
+
+function safeParseJsonObject(rawText: string): Record<string, unknown> | null {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Step A: Send audio to Sarvam AI Speech-To-Text (saaras:v4)
  * with Automatic Multimodal Gemini Audio Fallback
  */
 export async function runSarvamSTT(
-  audioBlob: Blob,
+  audioInput: AudioInput,
   sarvamApiKey: string,
   languageCode?: SupportedVoiceLanguage
 ): Promise<string> {
-  const rawMime = (audioBlob.type || 'audio/webm').toLowerCase();
-  const cleanMime = rawMime.split(';')[0].trim() || 'audio/webm';
-  const ext = cleanMime.includes('mp4')
-    ? 'mp4'
-    : cleanMime.includes('wav')
-    ? 'wav'
-    : cleanMime.includes('ogg')
-    ? 'ogg'
-    : cleanMime.includes('mpeg') || cleanMime.includes('mp3')
-    ? 'mp3'
-    : 'webm';
-  const arrayBuf = await audioBlob.arrayBuffer();
+  let bytes: Uint8Array;
+  let rawMime: string;
+
+  if (audioInput instanceof Blob) {
+    rawMime = audioInput.type || 'audio/webm';
+    const arrayBuf = await audioInput.arrayBuffer();
+    bytes = new Uint8Array(arrayBuf);
+  } else {
+    rawMime = audioInput.mimeType || 'audio/webm';
+    bytes =
+      audioInput.buffer instanceof Uint8Array
+        ? audioInput.buffer
+        : new Uint8Array(audioInput.buffer);
+  }
+
+  if (bytes.byteLength === 0) {
+    throw new Error('Uploaded audio file is empty (0 bytes).');
+  }
+
+  const cleanMime = normalizeAudioMimeType(rawMime);
+  const filename = getAudioFilenameForMime(cleanMime);
 
   // 1. First priority: Sarvam AI STT if API key is provided
   if (sarvamApiKey && sarvamApiKey.trim().length > 0) {
     try {
       const formData = new FormData();
-      const cleanBlob = new Blob([arrayBuf], { type: cleanMime });
-      formData.append('file', cleanBlob, `rider_voice.${ext}`);
+      const cleanBlob = new Blob([new Uint8Array(bytes)], { type: cleanMime });
+      formData.append('file', cleanBlob, filename);
       formData.append('model', 'saaras:v4');
       formData.append('mode', 'codemix');
       formData.append('language_code', languageCode || 'unknown');
@@ -184,10 +234,15 @@ export async function runSarvamSTT(
         }
       } else {
         const errorText = await response.text().catch(() => '');
-        console.warn(`[SteadyGig] Sarvam STT returned ${response.status}: ${errorText}. Activating Gemini audio fallback.`);
+        console.warn(
+          `[SteadyGig] Sarvam STT returned ${response.status}: ${errorText}. Activating Gemini audio fallback.`
+        );
       }
     } catch (sarvamErr) {
-      console.warn('[SteadyGig] Sarvam STT request error, activating Gemini audio fallback:', sarvamErr);
+      console.warn(
+        '[SteadyGig] Sarvam STT request error, activating Gemini audio fallback:',
+        sarvamErr
+      );
     }
   }
 
@@ -195,7 +250,7 @@ export async function runSarvamSTT(
   const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
   if (geminiApiKey) {
     try {
-      const base64Audio = Buffer.from(arrayBuf).toString('base64');
+      const base64Audio = Buffer.from(bytes).toString('base64');
       const ai = new GoogleGenAI({
         apiKey: geminiApiKey,
         httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
@@ -337,7 +392,7 @@ function parseSpokenNumericValue(transcript: string): number | null {
  * Onboarding Step Voice Parser + Spoken Read-Back Confirmation
  */
 export async function executeOnboardingStepVoice(params: {
-  audioBlob: Blob;
+  audioBlob: AudioInput;
   step: 1 | 2 | 3 | 4;
   languageCode: SupportedVoiceLanguage;
 }): Promise<OnboardingVoiceResult> {
@@ -378,14 +433,13 @@ Return JSON only: { "extractedValue": number | null }`;
         config: { responseMimeType: 'application/json' },
       });
       const text = res.text?.trim() || '';
-      if (text) {
-        const parsed = JSON.parse(text) as { extractedValue?: unknown };
-        if (
-          typeof parsed.extractedValue === 'number' &&
-          Number.isFinite(parsed.extractedValue)
-        ) {
-          extractedValue = Math.round(parsed.extractedValue);
-        }
+      const parsed = text ? safeParseJsonObject(text) : null;
+      if (
+        parsed &&
+        typeof parsed.extractedValue === 'number' &&
+        Number.isFinite(parsed.extractedValue)
+      ) {
+        extractedValue = Math.round(parsed.extractedValue);
       }
     } catch (err) {
       console.warn('[SteadyGig Onboarding Voice] Gemini extract fallback:', err);
@@ -531,16 +585,41 @@ Required JSON Schema:
       });
 
       const responseText = response.text?.trim() || '';
-      if (responseText) {
-        const parsed = JSON.parse(responseText);
-        if (parsed && parsed.intent && parsed.replyText) {
-          return {
-            intent: parsed.intent === 'CHECK_VAULT' ? 'CHECK_BILLS_SHIELD' : parsed.intent,
-            category: parsed.category || null,
-            amount: typeof parsed.amount === 'number' ? parsed.amount : null,
-            replyText: parsed.replyText,
-          };
-        }
+      const parsed = responseText ? safeParseJsonObject(responseText) : null;
+      const validIntents = new Set([
+        'LOG_EXPENSE',
+        'LOG_INCOME',
+        'CHECK_BILLS_SHIELD',
+        'CHECK_VAULT',
+        'SIMULATE_PAYOUT',
+      ]);
+      const validCategories = new Set(['fuel', 'food', 'rent', 'maintenance', 'income']);
+
+      if (
+        parsed &&
+        typeof parsed.intent === 'string' &&
+        validIntents.has(parsed.intent) &&
+        typeof parsed.replyText === 'string' &&
+        parsed.replyText.trim().length > 0
+      ) {
+        const normalizedIntent = (
+          parsed.intent === 'CHECK_VAULT' ? 'CHECK_BILLS_SHIELD' : parsed.intent
+        ) as VoiceIntentResult['intent'];
+        const normalizedCategory =
+          typeof parsed.category === 'string' && validCategories.has(parsed.category)
+            ? (parsed.category as VoiceIntentResult['category'])
+            : null;
+        const normalizedAmount =
+          typeof parsed.amount === 'number' && Number.isFinite(parsed.amount)
+            ? parsed.amount
+            : null;
+
+        return {
+          intent: normalizedIntent,
+          category: normalizedCategory,
+          amount: normalizedAmount,
+          replyText: parsed.replyText.trim(),
+        };
       }
     } catch (err) {
       console.warn('[SteadyGig Voice] Gemini API error, falling back to rule-based extractor:', err);
@@ -828,7 +907,7 @@ export const readVaultStatusAloud = readBillShieldStatusAloud;
  * Complete End-to-End Multilingual Voice Assistant Pipeline
  */
 export async function executeVoicePipeline(
-  audioBlob: Blob,
+  audioInput: AudioInput,
   userId: string,
   languageCode: SupportedVoiceLanguage = 'kn-IN'
 ): Promise<VoicePipelineResponse> {
@@ -836,13 +915,32 @@ export async function executeVoicePipeline(
   const geminiApiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
   const riderContext = await getRiderFinancialContext(userId);
-  const transcript = await runSarvamSTT(audioBlob, sarvamApiKey, languageCode);
-  const extraction = await extractIntentAndReply(
-    transcript,
-    riderContext,
-    geminiApiKey,
-    languageCode
-  );
+  const transcript = await runSarvamSTT(audioInput, sarvamApiKey, languageCode);
+
+  let extraction: VoiceIntentResult;
+  try {
+    extraction = await extractIntentAndReply(
+      transcript,
+      riderContext,
+      geminiApiKey,
+      languageCode
+    );
+  } catch (intentErr) {
+    console.warn(
+      '[SteadyGig Voice] Intent extraction threw unexpectedly, falling back to transcript + rule extractor:',
+      intentErr
+    );
+    try {
+      extraction = fallbackIntentExtractor(transcript, riderContext, languageCode);
+    } catch {
+      extraction = {
+        intent: 'CHECK_BILLS_SHIELD',
+        category: null,
+        amount: null,
+        replyText: transcript || 'Bill Shield active.',
+      };
+    }
+  }
 
   let updatedBalance = riderContext.balance;
   let transactionId: string | undefined;
@@ -852,21 +950,28 @@ export async function executeVoicePipeline(
     typeof extraction.amount === 'number' &&
     extraction.amount > 0
   ) {
-    const mutation = await mutateRiderTransaction(
-      riderContext,
-      extraction.intent,
-      extraction.category,
-      extraction.amount
-    );
-    updatedBalance = mutation.updatedBalance;
-    transactionId = mutation.transactionId;
+    try {
+      const mutation = await mutateRiderTransaction(
+        riderContext,
+        extraction.intent,
+        extraction.category,
+        extraction.amount
+      );
+      updatedBalance = mutation.updatedBalance;
+      transactionId = mutation.transactionId;
+    } catch (mutationErr) {
+      console.warn('[SteadyGig Voice] Transaction mutation fallback:', mutationErr);
+    }
   }
 
   const audioBase64 = await runSarvamTTS(
     extraction.replyText,
     sarvamApiKey,
     languageCode
-  );
+  ).catch((ttsErr) => {
+    console.warn('[SteadyGig Voice] TTS fallback:', ttsErr);
+    return null;
+  });
 
   const fuelDaily = riderContext.daily_fuel_spend || 250;
   const fuelProtected = Math.min(updatedBalance, fuelDaily * 2);
